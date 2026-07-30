@@ -301,6 +301,42 @@ action), so state changes are applied by **rebuild**:
 Markdown append recreates genuine checklist items with correct state (§3), and
 the note keeps its identity, folder, and creation date.
 
+## 11. Nesting is split across the two sources
+
+Neither source describes a note's lists completely:
+
+| | checked state | nesting depth |
+|---|---|---|
+| App Intents `Body` | **yes** | **no** — every item gets exactly one tab |
+| AppleScript `body` HTML | no | **yes** — nested `<ul>` elements |
+
+Real output for a three-level list, showing the flattening:
+
+```
+◦\tBarbell squat        <- depth 0
+\t◦\tSet 1: 135         <- depth 1   all identical
+\t◦\tdeep nested        <- depth 2
+```
+
+So structure is taken from the HTML and state from the bridge, zipped by
+document position (both enumerate items in the same order). Item text is
+compared as a guard; on any mismatch the depths are discarded and the note is
+reported as `nestingResolved: false` rather than rebuilt flat.
+
+Notes writes nested lists as **siblings** of the `<li>` they belong under, not
+as children:
+
+```html
+<ul>
+  <li>parent</li>
+  <ul><li>child</li></ul>   <!-- sibling, not nested inside the <li> -->
+</ul>
+```
+
+On the way back, Notes' Markdown importer creates one nesting level per **four
+spaces** of indent, and this round-trips exactly: rebuilding a two-level note
+reproduces byte-identical HTML.
+
 ## Remaining limitations
 
 1. No checklist-item enumeration action → state changes go through rebuild

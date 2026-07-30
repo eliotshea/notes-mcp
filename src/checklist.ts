@@ -26,12 +26,23 @@ export interface NoteLine {
   checked: boolean;
   /** Zero-based index among checklist items only; -1 for other kinds. */
   itemIndex: number;
+  /**
+   * Nesting depth for list lines; 0 for other kinds.
+   *
+   * The bridge body cannot express depth -- every item arrives with one tab
+   * regardless of indentation -- so this is filled in from the note's HTML by
+   * `applyDepths`. It stays 0 until that happens.
+   */
+  depth: number;
+  /** Zero-based index among ALL list lines (checklist and bullet). */
+  listIndex: number;
 }
 
 export interface ChecklistItem {
   index: number;
   text: string;
   checked: boolean;
+  depth: number;
 }
 
 const LIST_LINE = /^\t(.)\t([\s\S]*)$/;
@@ -55,6 +66,7 @@ export function parseBody(body: string): NoteLine[] {
   const lines = body.split("\n");
   const out: NoteLine[] = [];
   let itemIndex = 0;
+  let listIndex = 0;
 
   for (const raw of lines) {
     const m = raw.match(LIST_LINE) ?? raw.match(LIST_LINE_NO_INDENT);
@@ -66,10 +78,19 @@ export function parseBody(body: string): NoteLine[] {
           text,
           checked: marker === MARKER_CHECKED,
           itemIndex: itemIndex++,
+          depth: 0,
+          listIndex: listIndex++,
         });
         continue;
       }
-      out.push({ kind: "bullet", text, checked: false, itemIndex: -1 });
+      out.push({
+        kind: "bullet",
+        text,
+        checked: false,
+        itemIndex: -1,
+        depth: 0,
+        listIndex: listIndex++,
+      });
       continue;
     }
     out.push({
@@ -77,6 +98,8 @@ export function parseBody(body: string): NoteLine[] {
       text: raw,
       checked: false,
       itemIndex: -1,
+      depth: 0,
+      listIndex: -1,
     });
   }
   return out;
@@ -86,7 +109,7 @@ export function parseBody(body: string): NoteLine[] {
 export function parseChecklist(body: string): ChecklistItem[] {
   return parseBody(body)
     .filter((l) => l.kind === "checklist")
-    .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked }));
+    .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked, depth: l.depth }));
 }
 
 /** True when the note contains at least one checklist item. */
@@ -124,12 +147,15 @@ export function renderMarkdown(
       continue;
     }
 
+    // Notes' Markdown importer nests a list item per four spaces of indent.
+    const indent = "    ".repeat(Math.max(0, line.depth));
+
     switch (line.kind) {
       case "checklist":
-        out.push(`- [${line.checked ? "x" : " "}] ${escapeMarkdown(line.text)}`);
+        out.push(`${indent}- [${line.checked ? "x" : " "}] ${escapeMarkdown(line.text)}`);
         break;
       case "bullet":
-        out.push(`- ${escapeMarkdown(line.text)}`);
+        out.push(`${indent}- ${escapeMarkdown(line.text)}`);
         break;
       case "blank":
         out.push("");
@@ -167,4 +193,20 @@ export function matchByText(needle: string, exact = false) {
 export function matchByIndex(indices: number[]) {
   const set = new Set(indices);
   return (line: NoteLine) => set.has(line.itemIndex);
+}
+
+/**
+ * Overlay nesting depths (derived from the note's HTML) onto parsed lines.
+ *
+ * `depths` is indexed by `listIndex`, i.e. position among all list lines. When
+ * the two sources disagree the caller passes an empty array and everything
+ * stays flat -- guessing here would silently restructure the note.
+ */
+export function applyDepths(lines: NoteLine[], depths: number[]): NoteLine[] {
+  if (depths.length === 0) return lines;
+  return lines.map((line) =>
+    line.listIndex >= 0 && line.listIndex < depths.length
+      ? { ...line, depth: depths[line.listIndex] }
+      : line,
+  );
 }

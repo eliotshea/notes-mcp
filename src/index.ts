@@ -80,17 +80,31 @@ server.tool(
 server.tool(
   "read_note",
   "Read a note's full content. Checklist items appear as ◦ (unchecked), ✓ (checked), " +
-    "and ⁃ marks an ordinary bullet. This is the only way to observe checked state.",
+    "and ⁃ marks an ordinary bullet. Each checklist item also reports its nesting " +
+    "depth. This is the only way to observe checked state.",
   { note: noteRef },
   wrap(async ({ note }) => {
     const c = await notes.readNote(note);
-    return { note: c.note, content: c.raw, checklist: c.checklist };
+    return {
+      note: c.note,
+      content: c.raw,
+      checklist: c.checklist,
+      nestingResolved: c.nestingResolved,
+      ...(c.nestingResolved
+        ? {}
+        : {
+            warning:
+              "List nesting could not be recovered; depths are reported as 0 and " +
+              "rewriting this note would flatten indented items.",
+          }),
+    };
   }),
 );
 
 server.tool(
   "read_checklist",
-  "Read just the checklist items of a note, with their checked state and indices.",
+  "Read just the checklist items of a note, with checked state, indices, and " +
+    "nesting depth (0 = top level).",
   { note: noteRef },
   wrap(({ note }) => notes.readChecklist(note)),
 );

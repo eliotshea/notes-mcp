@@ -98,10 +98,11 @@ describe("parseBody", () => {
 
 describe("parseChecklist", () => {
   it("returns only checklist items with state", () => {
+    // depth is 0 until the caller overlays it from the note's HTML
     assert.deepEqual(parseChecklist(REAL_BODY), [
-      { index: 0, text: "unchecked-item-one", checked: false },
-      { index: 1, text: "checked-item-two", checked: true },
-      { index: 2, text: "unchecked-item-three", checked: false },
+      { index: 0, text: "unchecked-item-one", checked: false, depth: 0 },
+      { index: 1, text: "checked-item-two", checked: true, depth: 0 },
+      { index: 2, text: "unchecked-item-three", checked: false, depth: 0 },
     ]);
   });
 

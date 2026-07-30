@@ -17,13 +17,14 @@ import * as bridge from "./shortcuts.js";
 import {
   type ChecklistItem,
   type NoteLine,
+  applyDepths,
   matchByIndex,
   matchByText,
   parseBody,
-  parseChecklist,
   renderMarkdown,
   setChecked,
 } from "./checklist.js";
+import { alignDepths, parseHtmlList } from "./htmllist.js";
 
 export class NoteNotFoundError extends Error {
   constructor(ref: string) {
@@ -39,6 +40,17 @@ export class AmbiguousNoteError extends Error {
         `The Notes bridge addresses notes by name, so rename one or pass a note id.`,
     );
     this.name = "AmbiguousNoteError";
+  }
+}
+
+export class NestingUnresolvedError extends Error {
+  constructor(name: string) {
+    super(
+      `Could not recover list nesting for ${JSON.stringify(name)}, so rewriting it ` +
+        `would flatten indented items. This happens when the note's HTML and its ` +
+        `App Intents text disagree. Pass force: true to rebuild it flat anyway.`,
+    );
+    this.name = "NestingUnresolvedError";
   }
 }
 
@@ -77,22 +89,59 @@ export interface NoteContent {
   raw: string;
   lines: NoteLine[];
   checklist: ChecklistItem[];
+  /**
+   * False when list nesting could not be recovered, in which case every item is
+   * reported at depth 0 and a rebuild would flatten the note.
+   */
+  nestingResolved: boolean;
 }
 
-/** Read a note's content including checklist state. */
+/**
+ * Read a note's content including checklist state and list nesting.
+ *
+ * Neither source is sufficient alone: the bridge body carries checked state but
+ * flattens nesting (every item gets one tab regardless of depth), while the
+ * AppleScript HTML preserves nesting but has no state. They enumerate list
+ * items in the same order, so depths are zipped onto the parsed lines by
+ * position, with a text comparison guarding against misalignment.
+ */
 export async function readNote(ref: string): Promise<NoteContent> {
   const note = await resolveNote(ref);
   const raw = await bridge.readBody(note.name);
-  return { note, raw, lines: parseBody(raw), checklist: parseChecklist(raw) };
+  let lines = parseBody(raw);
+
+  let nestingResolved = true;
+  const listLines = lines.filter((l) => l.listIndex >= 0);
+  if (listLines.length > 0) {
+    const html = await as.getBodyHtml(note.id);
+    const { depths, aligned } = alignDepths(
+      listLines.map((l) => l.text),
+      parseHtmlList(html),
+    );
+    nestingResolved = aligned;
+    if (aligned) lines = applyDepths(lines, depths);
+  }
+
+  const checklist = lines
+    .filter((l) => l.kind === "checklist")
+    .map((l) => ({
+      index: l.itemIndex,
+      text: l.text,
+      checked: l.checked,
+      depth: l.depth,
+    }));
+
+  return { note, raw, lines, checklist, nestingResolved };
 }
 
 /** Read just the checklist items of a note. */
 export async function readChecklist(ref: string): Promise<{
   note: as.NoteMeta;
   items: ChecklistItem[];
+  nestingResolved: boolean;
 }> {
-  const { note, checklist } = await readNote(ref);
-  return { note, items: checklist };
+  const { note, checklist, nestingResolved } = await readNote(ref);
+  return { note, items: checklist, nestingResolved };
 }
 
 /** Append Markdown to a note without disturbing existing content. */
@@ -172,12 +221,17 @@ async function applyChecklistChange(
   value: boolean | "toggle",
   force: boolean,
 ): Promise<ChecklistChange> {
-  const { note, lines, checklist } = await readNote(ref);
+  const { note, lines, checklist, nestingResolved } = await readNote(ref);
+
+  // A rebuild rewrites the whole note, so unrecoverable nesting would silently
+  // flatten it. Refuse rather than damage the note's structure.
+  if (!nestingResolved && !force) throw new NestingUnresolvedError(note.name);
+
   const updated = setChecked(lines, predicate, value);
 
   const after = updated
     .filter((l) => l.kind === "checklist")
-    .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked }));
+    .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked, depth: l.depth }));
   const changed = after.filter((a, i) => a.checked !== checklist[i]?.checked).length;
 
   if (changed > 0) await rebuild(note, updated, force);

@@ -98,6 +98,14 @@ Notes does the Markdown conversion itself, so it round-trips cleanly:
 Reading a note back yields tab-delimited markers — `◦` unchecked, `✓` checked,
 `⁃` ordinary bullet — which the server parses into structured items for you.
 
+**Nested lists are preserved.** Apple's two APIs each tell half the story: the
+App Intents text carries checked state but flattens indentation, while the
+AppleScript HTML preserves indentation but has no state. The server reads both
+and merges them, so each item reports a `depth` and rebuilds reproduce the
+original nesting exactly. If the two sources ever disagree, tools report
+`nestingResolved: false` and refuse to rewrite rather than silently flattening
+your note.
+
 ## Example
 
 ```
@@ -137,7 +145,8 @@ folder, and creation date.
   error rather than guessing.
 - **Rebuild is lossy for rich content.** Images, tables, and inline styling in the
   same note are not reconstructed. Tools that rebuild refuse when they detect
-  attachments or tables; pass `force: true` to override.
+  attachments or tables; pass `force: true` to override. List nesting *is*
+  preserved.
 - **Password-protected notes** are unreadable.
 - **Setup needs manual clicks** — three, once.
 - **Bridge dispatch is ~0.4s warm**, a few seconds cold. Discovery tools are much
