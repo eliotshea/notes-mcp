@@ -1,0 +1,49 @@
+{
+  "name": "notes-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for reading and editing Apple Notes, including checklist state",
+  "license": "MIT",
+  "author": "eliotshea",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "notes-mcp": "dist/index.js",
+    "notes-mcp-setup": "dist/setup.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "setup": "node dist/setup.js",
+    "test": "npm run build && node --test 'test/**/*.test.js'",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "apple-notes",
+    "notes",
+    "macos",
+    "applescript",
+    "shortcuts",
+    "app-intents",
+    "checklist"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "plist": "^3.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/plist": "^3.0.5",
+    "typescript": "^5.7.2"
+  }
+}
