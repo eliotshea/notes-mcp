@@ -224,8 +224,63 @@ describe("edge cases", () => {
     assert.equal(items[0].text, "a\tb");
   });
 
-  it("treats an unknown marker as an ordinary bullet", () => {
+  it("treats an unknown marker as text, not a guessed list item", () => {
+    // Only the markers Notes actually emits are accepted. Anything else falls
+    // through to text so alignment fails loudly, rather than misreading prose
+    // that happens to contain tabs.
     const lines = parseBody("T\n\t•\tmystery");
-    assert.equal(lines[1].kind, "bullet");
+    assert.equal(lines[1].kind, "text");
+  });
+});
+
+describe("ordered lists", () => {
+  it("parses `N.` markers, which are not a single glyph", () => {
+    const lines = parseBody("T\n\t1.\tfirst\n\t2.\tsecond");
+    assert.equal(lines[1].kind, "ordered");
+    assert.equal(lines[1].ordinal, 1);
+    assert.equal(lines[1].text, "first");
+    assert.equal(lines[2].ordinal, 2);
+  });
+
+  it("counts ordered items as list lines for alignment", () => {
+    const lines = parseBody("\t1.\tfirst\n\t2.\tsecond");
+    assert.deepEqual(
+      lines.map((l) => l.listIndex),
+      [0, 1],
+    );
+  });
+
+  it("renders them back with their number rather than escaping them", () => {
+    // Previously these fell through to text and escapeMarkdown turned
+    // "1. first" into "\\1. first", corrupting every numbered-list note.
+    assert.equal(renderMarkdown(parseBody("\t3.\tthird\n\t4.\tfourth")), "3. third\n4. fourth");
+  });
+
+  it("indents nested ordered items", () => {
+    const lines = parseBody("\t1.\touter\n\t1.\tinner");
+    lines[1].depth = 1;
+    assert.equal(renderMarkdown(lines), "1. outer\n    1. inner");
+  });
+});
+
+describe("headings", () => {
+  it("renders a heading once a level has been overlaid from HTML", () => {
+    const lines = parseBody("Big\n\nprose");
+    lines[0].headingLevel = 1;
+    assert.equal(renderMarkdown(lines).split("\n")[0], "# Big");
+    lines[0].headingLevel = 2;
+    assert.equal(renderMarkdown(lines).split("\n")[0], "## Big");
+    lines[0].headingLevel = 3;
+    assert.equal(renderMarkdown(lines).split("\n")[0], "### Big");
+  });
+
+  it("leaves lines alone at level 0 (the un-overlaid default)", () => {
+    assert.equal(renderMarkdown(parseBody("Big")), "Big");
+  });
+
+  it("never turns a list item into a heading", () => {
+    const lines = parseBody("\t◦\titem");
+    lines[0].headingLevel = 1;
+    assert.equal(renderMarkdown(lines), "- [ ] item");
   });
 });

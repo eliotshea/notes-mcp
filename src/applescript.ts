@@ -223,26 +223,61 @@ export function htmlHasRichContent(html: string): boolean {
 }
 
 /**
+ * Extract a note's title line -- the first top-level `<div>…</div>` of its HTML.
+ *
+ * Returns the markup verbatim, including any `<h1>`, because Notes rewrites
+ * whatever it is given and the styling depends entirely on that markup:
+ *
+ *   <div>Leg day</div>            -> font-size 11px   (body text, looks tiny)
+ *   <div><h1>Leg day</h1></div>   -> font-size 21px bold (title)
+ *
+ * Synthesising the title from its plain text therefore silently demoted every
+ * `<h1>` title to body size.
+ */
+export function extractTitleHtml(html: string): string | null {
+  const m = html.match(/^\s*<div\b[^>]*>[\s\S]*?<\/div\s*>/i);
+  return m ? m[0] : null;
+}
+
+/**
  * Replace a note's entire body with just its title line.
  *
  * This is destructive by design — it is step 2 of the checklist rebuild, where
  * the items are immediately re-appended as Markdown. Never call it on a note
  * whose content has not already been read.
+ *
+ * Pass `titleHtml` (from `extractTitleHtml`) to preserve the original title
+ * styling. Falling back to the plain title renders it at body size.
  */
-export async function clearBody(noteId: string, title: string): Promise<void> {
+export async function clearBody(
+  noteId: string,
+  title: string,
+  titleHtml?: string | null,
+): Promise<void> {
+  return setBodyHtml(noteId, titleHtml ?? `<div>${escapeHtml(title)}</div>`);
+}
+
+/**
+ * Overwrite a note's body with raw HTML.
+ *
+ * Note this DESTROYS any checklist in the note -- items become plain bullets --
+ * so it is only safe when the checklists are about to be re-appended as
+ * Markdown, or when restoring a note after a failed rebuild.
+ */
+export async function setBodyHtml(noteId: string, html: string): Promise<void> {
   await runJxa(
     `
     for (const f of Notes.folders()) {
       const ids = f.notes.id();
       const i = ids.indexOf(ARG.id);
       if (i !== -1) {
-        f.notes.byId(ARG.id).body = "<div>" + ARG.title + "</div>";
+        f.notes.byId(ARG.id).body = ARG.html;
         return JSON.stringify(true);
       }
     }
     throw new Error("note not found: " + ARG.id);
   `,
-    { id: noteId, title: escapeHtml(title) },
+    { id: noteId, html },
   );
 }
 

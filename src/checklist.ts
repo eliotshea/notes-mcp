@@ -17,7 +17,7 @@ export const MARKER_UNCHECKED = "◦"; // ◦
 export const MARKER_CHECKED = "✓"; // ✓
 export const MARKER_BULLET = "⁃"; // ⁃
 
-export type LineKind = "checklist" | "bullet" | "text" | "blank";
+export type LineKind = "checklist" | "bullet" | "ordered" | "text" | "blank";
 
 export interface NoteLine {
   kind: LineKind;
@@ -34,8 +34,17 @@ export interface NoteLine {
    * `applyDepths`. It stays 0 until that happens.
    */
   depth: number;
-  /** Zero-based index among ALL list lines (checklist and bullet). */
+  /** Zero-based index among ALL list lines (checklist, bullet and ordered). */
   listIndex: number;
+  /** The literal number of an ordered item, e.g. 2 for `2.`; 0 otherwise. */
+  ordinal: number;
+  /**
+   * 1-3 for a heading (Title / Heading / Subheading), 0 otherwise.
+   *
+   * The bridge body strips heading levels entirely, so this is recovered from
+   * the note's HTML by `applyStructure` and stays 0 until then.
+   */
+  headingLevel: number;
 }
 
 export interface ChecklistItem {
@@ -45,16 +54,21 @@ export interface ChecklistItem {
   depth: number;
 }
 
-const LIST_LINE = /^\t(.)\t([\s\S]*)$/;
+/**
+ * A list line is `\t<marker>\t<text>`. The marker is one of the three bullet
+ * glyphs, or `N.` for an ordered item -- ordered lists are why this cannot be a
+ * single-character match.
+ */
+const MARKERS = `${MARKER_UNCHECKED}${MARKER_CHECKED}${MARKER_BULLET}`;
+const LIST_LINE = new RegExp(`^\\t([${MARKERS}]|\\d+\\.)\\t([\\s\\S]*)$`);
+
 /**
  * The very first line of the returned body has its leading tab stripped, so a
  * list item at the top of a note arrives as `✓\ttext` rather than `\t✓\ttext`.
- * Only the three known markers are accepted here, to avoid misreading ordinary
- * prose that happens to contain a tab.
  */
-const LIST_LINE_NO_INDENT = new RegExp(
-  `^([${MARKER_UNCHECKED}${MARKER_CHECKED}${MARKER_BULLET}])\\t([\\s\\S]*)$`,
-);
+const LIST_LINE_NO_INDENT = new RegExp(`^([${MARKERS}]|\\d+\\.)\\t([\\s\\S]*)$`);
+
+const ORDERED_MARKER = /^(\d+)\.$/;
 
 /**
  * Parse the plain-text body returned by the read bridge into structured lines.
@@ -72,24 +86,28 @@ export function parseBody(body: string): NoteLine[] {
     const m = raw.match(LIST_LINE) ?? raw.match(LIST_LINE_NO_INDENT);
     if (m) {
       const [, marker, text] = m;
+      const base = { text, depth: 0, listIndex: listIndex++ };
+
       if (marker === MARKER_CHECKED || marker === MARKER_UNCHECKED) {
         out.push({
+          ...base,
           kind: "checklist",
-          text,
           checked: marker === MARKER_CHECKED,
           itemIndex: itemIndex++,
-          depth: 0,
-          listIndex: listIndex++,
+          ordinal: 0,
+          headingLevel: 0,
         });
         continue;
       }
+
+      const ord = marker.match(ORDERED_MARKER);
       out.push({
-        kind: "bullet",
-        text,
+        ...base,
+        kind: ord ? "ordered" : "bullet",
         checked: false,
         itemIndex: -1,
-        depth: 0,
-        listIndex: listIndex++,
+        ordinal: ord ? Number(ord[1]) : 0,
+        headingLevel: 0,
       });
       continue;
     }
@@ -100,6 +118,8 @@ export function parseBody(body: string): NoteLine[] {
       itemIndex: -1,
       depth: 0,
       listIndex: -1,
+      ordinal: 0,
+      headingLevel: 0,
     });
   }
   return out;
@@ -157,11 +177,18 @@ export function renderMarkdown(
       case "bullet":
         out.push(`${indent}- ${escapeMarkdown(line.text)}`);
         break;
+      case "ordered":
+        out.push(`${indent}${line.ordinal || 1}. ${escapeMarkdown(line.text)}`);
+        break;
       case "blank":
         out.push("");
         break;
       case "text":
-        out.push(escapeMarkdown(line.text));
+        out.push(
+          line.headingLevel > 0
+            ? `${"#".repeat(line.headingLevel)} ${escapeMarkdown(line.text)}`
+            : escapeMarkdown(line.text),
+        );
         break;
     }
   }
@@ -209,4 +236,22 @@ export function applyDepths(lines: NoteLine[], depths: number[]): NoteLine[] {
       ? { ...line, depth: depths[line.listIndex] }
       : line,
   );
+}
+
+/**
+ * Overlay per-line structure recovered from the note's HTML.
+ *
+ * `structure` is parallel to `lines`. An empty array leaves everything flat,
+ * which is what happens when alignment could not be trusted.
+ */
+export function applyStructure(
+  lines: NoteLine[],
+  structure: { depth: number; headingLevel: number }[],
+): NoteLine[] {
+  if (structure.length !== lines.length) return lines;
+  return lines.map((line, i) => ({
+    ...line,
+    depth: line.listIndex >= 0 ? structure[i].depth : 0,
+    headingLevel: line.kind === "text" ? structure[i].headingLevel : 0,
+  }));
 }

@@ -22,8 +22,16 @@ export interface HtmlListItem {
   text: string;
   /** 0 for a top-level item, 1 for one level of indent, and so on. */
   depth: number;
-  /** True when the item sits in a `Apple-dash-list`, i.e. an ordinary bullet. */
+  /**
+   * True when the item sits in an `Apple-dash-list`.
+   *
+   * Only a hint: AppleScript stamps one class on the whole `<ul>`, so a list
+   * mixing bullets and checklist items reports the FIRST item's type for all of
+   * them. The bridge is authoritative for list type; this is not.
+   */
   dashList: boolean;
+  /** True when the item sits in an `<ol>`. */
+  ordered: boolean;
 }
 
 const ENTITIES: Record<string, string> = {
@@ -35,8 +43,24 @@ const ENTITIES: Record<string, string> = {
   nbsp: " ",
 };
 
+/**
+ * Decode HTML entities, with or without the trailing semicolon.
+ *
+ * Notes emits malformed entities: `&amp&amp` renders as `&&`, and escaped
+ * markup arrives as `&ltu&gt`. Requiring the semicolon left these undecoded,
+ * so the text comparison in `alignDepths` failed and affected notes -- such as
+ * `Cleaning Schedule` -- were refused rather than rebuilt.
+ */
+// Without a trailing semicolon a greedy `[a-z]+` over-consumes -- `&ltu&gt`
+// would match the name "ltu" and decode nothing. Match known names explicitly,
+// longest first, so `&lt` is recognised even when `u` follows it.
+const ENTITY_NAMES = Object.keys(ENTITIES)
+  .sort((a, b) => b.length - a.length)
+  .join("|");
+const ENTITY_RE = new RegExp(`&(#x[0-9a-f]+|#\\d+|${ENTITY_NAMES});?`, "gi");
+
 export function decodeEntities(s: string): string {
-  return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
+  return s.replace(ENTITY_RE, (whole, body: string) => {
     if (body[0] === "#") {
       const code =
         body[1] === "x" || body[1] === "X"
@@ -54,29 +78,113 @@ function textOf(html: string): string {
 }
 
 /**
+ * A top-level block of a note's HTML, in document order.
+ *
+ * Notes lays a note out as a flat sequence of `<div>` paragraphs and
+ * `<ul>`/`<ol>` lists; only lists nest. Each block corresponds to exactly one
+ * line of the bridge body, which is what makes them alignable.
+ */
+export interface HtmlBlock {
+  kind: "heading" | "text" | "blank" | "item";
+  /** 1-3 for headings (Title / Heading / Subheading), 0 otherwise. */
+  level: number;
+  text: string;
+  /** List nesting depth; 0 for non-items. */
+  depth: number;
+  ordered: boolean;
+  dashList: boolean;
+}
+
+/**
+ * Parse a note's HTML into ordered blocks.
+ *
+ * The first block is the note's title, which the bridge body omits -- callers
+ * aligning against the bridge must drop it.
+ */
+export function parseHtmlBlocks(html: string): HtmlBlock[] {
+  const blocks: HtmlBlock[] = [];
+  const stack: { dashList: boolean; ordered: boolean }[] = [];
+
+  const token =
+    /<(ul|ol)\b([^>]*)>|<\/(?:ul|ol)\s*>|<li\b[^>]*>([\s\S]*?)<\/li\s*>|<div\b[^>]*>([\s\S]*?)<\/div\s*>/gi;
+  let m: RegExpExecArray | null;
+
+  while ((m = token.exec(html)) !== null) {
+    const [whole, openTag, attrs, liInner, divInner] = m;
+
+    if (openTag) {
+      stack.push({
+        dashList: /Apple-dash-list/i.test(attrs ?? ""),
+        ordered: openTag.toLowerCase() === "ol",
+      });
+      continue;
+    }
+    if (whole.toLowerCase().startsWith("</")) {
+      stack.pop();
+      continue;
+    }
+    if (liInner !== undefined) {
+      const top = stack[stack.length - 1];
+      blocks.push({
+        kind: "item",
+        level: 0,
+        text: textOf(liInner),
+        depth: Math.max(0, stack.length - 1),
+        ordered: top?.ordered ?? false,
+        dashList: top?.dashList ?? false,
+      });
+      continue;
+    }
+    if (divInner !== undefined) {
+      // A div inside a list is layout noise, not a paragraph.
+      if (stack.length) continue;
+      const heading = divInner.match(/<h([1-3])\b/i);
+      const text = textOf(divInner);
+      blocks.push({
+        kind: text === "" ? "blank" : heading ? "heading" : "text",
+        level: heading ? Number(heading[1]) : 0,
+        text,
+        depth: 0,
+        ordered: false,
+        dashList: false,
+      });
+    }
+  }
+  return blocks;
+}
+
+/**
  * Walk a note's HTML and return every list item with its nesting depth, in
  * document order -- the same order the bridge returns them in.
  */
 export function parseHtmlList(html: string): HtmlListItem[] {
   const items: HtmlListItem[] = [];
-  // Track the stack of open <ul>s so depth is just its height.
-  const stack: { dashList: boolean }[] = [];
+  // Track the stack of open lists so depth is just its height.
+  const stack: { dashList: boolean; ordered: boolean }[] = [];
 
-  const token = /<ul\b([^>]*)>|<\/ul\s*>|<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi;
+  // <ol> must be matched too: ordered items appear in the bridge as `\tN.\t`,
+  // and omitting them here made the item counts disagree, which failed
+  // alignment and blocked every numbered-list note.
+  const token = /<(ul|ol)\b([^>]*)>|<\/(?:ul|ol)\s*>|<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi;
   let m: RegExpExecArray | null;
 
   while ((m = token.exec(html)) !== null) {
-    const [whole, ulAttrs, liInner] = m;
-    if (whole.toLowerCase().startsWith("<ul")) {
-      stack.push({ dashList: /Apple-dash-list/i.test(ulAttrs ?? "") });
-    } else if (whole.toLowerCase().startsWith("</ul")) {
+    const [whole, openTag, attrs, liInner] = m;
+    const lower = whole.toLowerCase();
+    if (openTag) {
+      stack.push({
+        dashList: /Apple-dash-list/i.test(attrs ?? ""),
+        ordered: openTag.toLowerCase() === "ol",
+      });
+    } else if (lower.startsWith("</")) {
       stack.pop();
     } else {
-      const depth = Math.max(0, stack.length - 1);
+      const top = stack[stack.length - 1];
       items.push({
         text: textOf(liInner ?? ""),
-        depth,
-        dashList: stack[stack.length - 1]?.dashList ?? false,
+        depth: Math.max(0, stack.length - 1),
+        dashList: top?.dashList ?? false,
+        ordered: top?.ordered ?? false,
       });
     }
   }
@@ -91,6 +199,59 @@ export function parseHtmlList(html: string): HtmlListItem[] {
  * information is discarded rather than applied to the wrong items, since a
  * wrong indent silently restructures the user's note.
  */
+/** Structure recovered from HTML for one bridge line. */
+export interface LineStructure {
+  depth: number;
+  /** 1-3 for headings, 0 otherwise. */
+  headingLevel: number;
+}
+
+/**
+ * Align every bridge line with its HTML block, recovering both nesting depth
+ * and heading level.
+ *
+ * The bridge body flattens nesting AND strips heading levels -- `<h1>`, `<h2>`
+ * and `<h3>` all arrive as ordinary prose -- so neither survives without this.
+ * Blocks and lines correspond one-to-one once the title block is dropped.
+ *
+ * Text is compared as a guard. On any disagreement the caller is told alignment
+ * failed and nothing is overlaid, because applying structure to the wrong lines
+ * would silently restructure the note.
+ */
+export function alignBlocks(
+  bridgeLines: { text: string; isList: boolean }[],
+  blocks: HtmlBlock[],
+): { structure: LineStructure[]; aligned: boolean } {
+  const flat = bridgeLines.map(() => ({ depth: 0, headingLevel: 0 }));
+  // The first block is the title, which the bridge omits.
+  const body = blocks.length && blocks[0].kind !== "item" ? blocks.slice(1) : blocks;
+
+  // The bridge body ends with a newline, producing a trailing blank line that
+  // has no HTML block behind it. Ignore trailing blanks on both sides.
+  const isBlank = (l: { text: string; isList: boolean }) => !l.isList && l.text.trim() === "";
+  let n = bridgeLines.length;
+  while (n > 0 && isBlank(bridgeLines[n - 1])) n--;
+  let bn = body.length;
+  while (bn > 0 && body[bn - 1].kind === "blank") bn--;
+
+  if (bn !== n) return { structure: flat, aligned: false };
+
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+  for (let i = 0; i < n; i++) {
+    if (bridgeLines[i].isList !== (body[i].kind === "item")) {
+      return { structure: flat, aligned: false };
+    }
+    if (norm(bridgeLines[i].text) !== norm(body[i].text)) {
+      return { structure: flat, aligned: false };
+    }
+  }
+
+  const structure = flat.map((f, i) =>
+    i < n ? { depth: body[i].depth, headingLevel: body[i].level } : f,
+  );
+  return { structure, aligned: true };
+}
+
 export function alignDepths(
   bridgeTexts: string[],
   htmlItems: HtmlListItem[],

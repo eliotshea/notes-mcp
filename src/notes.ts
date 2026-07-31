@@ -17,14 +17,14 @@ import * as bridge from "./shortcuts.js";
 import {
   type ChecklistItem,
   type NoteLine,
-  applyDepths,
+  applyStructure,
   matchByIndex,
   matchByText,
   parseBody,
   renderMarkdown,
   setChecked,
 } from "./checklist.js";
-import { alignDepths, parseHtmlList } from "./htmllist.js";
+import { alignBlocks, parseHtmlBlocks } from "./htmllist.js";
 
 export class NoteNotFoundError extends Error {
   constructor(ref: string) {
@@ -51,6 +51,30 @@ export class NestingUnresolvedError extends Error {
         `App Intents text disagree. Pass force: true to rebuild it flat anyway.`,
     );
     this.name = "NestingUnresolvedError";
+  }
+}
+
+/**
+ * A rebuild failed after the note's body had already been cleared.
+ *
+ * `restored` says whether the original content was put back. Even when it was,
+ * the restore goes through AppleScript HTML, which cannot express checkboxes --
+ * so any checklist items come back as plain bullets and the caller needs to
+ * know that rather than assume the note is untouched.
+ */
+export class RebuildFailedError extends Error {
+  constructor(name: string, cause: unknown, restored: boolean) {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    super(
+      restored
+        ? `Rebuilding ${JSON.stringify(name)} failed (${why}). The original content ` +
+            `was restored, but any checklist items in it are now plain bullets, ` +
+            `because the restore path cannot write checkboxes.`
+        : `Rebuilding ${JSON.stringify(name)} failed (${why}) AND the content could ` +
+            `not be restored. The note may currently hold only its title. ` +
+            `Check Notes and recover from a version history if needed.`,
+    );
+    this.name = "RebuildFailedError";
   }
 }
 
@@ -110,17 +134,15 @@ export async function readNote(ref: string): Promise<NoteContent> {
   const raw = await bridge.readBody(note.name);
   let lines = parseBody(raw);
 
-  let nestingResolved = true;
-  const listLines = lines.filter((l) => l.listIndex >= 0);
-  if (listLines.length > 0) {
-    const html = await as.getBodyHtml(note.id);
-    const { depths, aligned } = alignDepths(
-      listLines.map((l) => l.text),
-      parseHtmlList(html),
-    );
-    nestingResolved = aligned;
-    if (aligned) lines = applyDepths(lines, depths);
-  }
+  // The bridge body flattens nesting AND strips heading levels, so both are
+  // recovered from the note's HTML and overlaid by position.
+  const html = await as.getBodyHtml(note.id);
+  const { structure, aligned } = alignBlocks(
+    lines.map((l) => ({ text: l.text, isList: l.listIndex >= 0 })),
+    parseHtmlBlocks(html),
+  );
+  const nestingResolved = aligned;
+  if (aligned) lines = applyStructure(lines, structure);
 
   const checklist = lines
     .filter((l) => l.kind === "checklist")
@@ -181,6 +203,17 @@ export async function createNote(
   }
   const note = matches[0];
 
+  // App Intents indexes a new note slightly after it exists, so an immediate
+  // read comes back empty. Wait until the content is visible, otherwise a
+  // create-then-read sequence silently reports an empty note.
+  if ((markdown ?? "").trim()) {
+    for (let i = 0; i < 10; i++) {
+      const body = await bridge.readBody(title).catch(() => "");
+      if (body.trim()) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
   if (folder && note.folder !== folder) {
     await as.moveNote(note.id, folder);
     return { ...note, folder };
@@ -197,14 +230,28 @@ async function rebuild(
   lines: NoteLine[],
   force: boolean,
 ): Promise<void> {
-  if (!force) {
-    const html = await as.getBodyHtml(note.id);
-    if (as.htmlHasRichContent(html)) throw new RichContentError(note.name);
-  }
+  const html = await as.getBodyHtml(note.id);
+  if (!force && as.htmlHasRichContent(html)) throw new RichContentError(note.name);
+
   const markdown = renderMarkdown(lines);
-  await as.clearBody(note.id, note.name);
-  if (markdown.trim()) {
+  if (!markdown.trim()) return; // nothing to write; leave the note alone
+
+  // Keep the title's original markup: Notes styles a written body purely from
+  // its markup, so synthesising <div>{title}</div> demotes an <h1> title to
+  // body size and it renders tiny.
+  await as.clearBody(note.id, note.name, as.extractTitleHtml(html));
+
+  try {
     await bridge.appendMarkdown(note.name, markdown);
+  } catch (e) {
+    // The body is currently empty. Put the original content back rather than
+    // leaving the note holding only its title.
+    try {
+      await as.setBodyHtml(note.id, html);
+    } catch {
+      throw new RebuildFailedError(note.name, e, false);
+    }
+    throw new RebuildFailedError(note.name, e, true);
   }
 }
 
@@ -271,11 +318,21 @@ export async function replaceContent(
   force = false,
 ): Promise<as.NoteMeta> {
   const note = await resolveNote(ref);
-  if (!force) {
-    const html = await as.getBodyHtml(note.id);
-    if (as.htmlHasRichContent(html)) throw new RichContentError(note.name);
+  const html = await as.getBodyHtml(note.id);
+  if (!force && as.htmlHasRichContent(html)) throw new RichContentError(note.name);
+
+  await as.clearBody(note.id, note.name, as.extractTitleHtml(html));
+  if (markdown.trim()) {
+    try {
+      await bridge.appendMarkdown(note.name, markdown);
+    } catch (e) {
+      try {
+        await as.setBodyHtml(note.id, html);
+      } catch {
+        throw new RebuildFailedError(note.name, e, false);
+      }
+      throw new RebuildFailedError(note.name, e, true);
+    }
   }
-  await as.clearBody(note.id, note.name);
-  if (markdown.trim()) await bridge.appendMarkdown(note.name, markdown);
   return note;
 }

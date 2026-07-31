@@ -337,15 +337,97 @@ On the way back, Notes' Markdown importer creates one nesting level per **four
 spaces** of indent, and this round-trips exactly: rebuilding a two-level note
 reproduces byte-identical HTML.
 
+## 12. What styling can and cannot round-trip
+
+Notes' full vocabulary, from the App Intents metadata: paragraph styles **Title,
+Heading, Subheading, Body, Monostyled, Caption**, list styles **Bulleted, Dashed,
+Numbered, Checklist**, and character styles **bold, italic, underline,
+strikethrough** (`ApplyFormattingIntent`). Colour and highlight are UI-only.
+
+### The Markdown importer does NOT accept raw HTML
+
+Every tag is escaped to literal text:
+
+```
+input:  U_START <u>underlined</u> U_END
+result: U_START &ltu&gtunderlined&lt/u&gt U_END
+```
+
+Decisive: Markdown is the only write path that can produce checkboxes, so
+**underline, colour, highlight and Caption are unreachable in any note
+containing a checklist.** Writing rich HTML through AppleScript would destroy the
+checkboxes, and the three formatting intents (`ApplyFormattingIntent`,
+`SetParagraphStyleIntent`, `ReplaceSelectionIntent`) act on the UI selection,
+which is not reachable headlessly.
+
+Note also that Notes emits **entities without semicolons** (`&ltu&gt`, and
+`&amp&amp` for `&&`). A decoder must accept both forms, and a greedy `[a-z]+`
+match is wrong — `&ltu` would consume the `u`.
+
+### Verified Markdown support
+
+| Markdown | Result |
+|---|---|
+| `#` / `##` / `###` | `<h1>` / `<h2>` / `<h3>` |
+| `####` and deeper | clamped to `<h3>` — Notes has only three levels |
+| `**bold**`, `*italic*` | `<b>`, `<i>` |
+| `~~strike~~` | `<strike>` |
+| ` ``` ` fence | `<tt>` (Monostyled) |
+| `1.` | `<ol>` |
+| `-`, `- [ ]`, `- [x]` | dash list / unchecked / checked |
+| four spaces of indent | one nesting level |
+| `> quote`, `[text](url)` | **lost** — become plain text |
+
+### Ordered items and mixed lists
+
+The bridge marks ordered items `\t1.\t`, not a single glyph. A single-character
+marker regex silently dropped them to prose, and `escapeMarkdown` then turned
+`1. first` into `\1. first`, **corrupting every numbered-list note on rebuild**.
+
+Mixed adjacent list types round-trip correctly — a bullet directly followed by a
+checklist item survives as both. AppleScript's HTML disagrees (it stamps one
+`class` on the whole `<ul>`), so **the bridge is authoritative for list type and
+state; the HTML only for nesting depth and heading level.**
+
+### Titles
+
+Notes restyles any AppleScript-written body from its markup alone:
+
+| written | rendered |
+|---|---|
+| `<div>Leg day</div>` | `font-size: 11px` (body text) |
+| `<div><h1>Leg day</h1></div>` | `font-size: 21px` bold |
+
+Synthesising `<div>{title}</div>` therefore demoted every `<h1>` title to body
+size. The original title markup must be captured and written back verbatim.
+
+### Round-trip fidelity
+
+Rebuilding a 32-item note with three heading levels, nesting and malformed
+entities reproduces every item, depth, heading level and list kind. The **only**
+difference is that Notes trims trailing whitespace (`"Dishes "` → `"Dishes"`).
+
+## 13. Two write-ordering hazards
+
+- **Rebuild is not atomic.** It clears the body via AppleScript then appends via
+  the bridge; if the append fails the note is left holding only its title. The
+  original HTML is captured first and restored on failure — though the restore
+  cannot recreate checkboxes, so the error says so explicitly.
+- **App Intents indexes a new note slightly after it exists.** A create-then-read
+  returns empty, and a bridge call immediately following an AppleScript body
+  write can fail to find the note and fall back to an interactive picker.
+  Creation polls until the note is visible.
+
 ## Remaining limitations
 
 1. No checklist-item enumeration action → state changes go through rebuild
    rather than surgical per-item toggles.
-2. Rebuild reconstructs from plain text, so inline styling, attachments, and
-   tables in the same note are not preserved. Best suited to checklist-centric
-   notes; the server should refuse or warn when a note contains attachments.
-3. Shortcut installation requires one user confirmation per shortcut (setup only).
-4. Notes are addressed **by name**; duplicate names resolve to the first match.
+2. **Underline, colour, highlight, Caption, block quotes and links cannot be
+   written back**, because the Markdown importer rejects raw HTML (§12).
+   Attachments and tables are likewise unreconstructable.
+3. Rebuild trims trailing whitespace on every line.
+4. Shortcut installation requires one user confirmation per shortcut (setup only).
+5. Notes are addressed **by name**; duplicate names resolve to the first match.
 
 ## Operational notes
 

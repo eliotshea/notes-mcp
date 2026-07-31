@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { alignDepths, decodeEntities, parseHtmlList } from "../dist/htmllist.js";
+import {
+  alignBlocks,
+  alignDepths,
+  decodeEntities,
+  parseHtmlBlocks,
+  parseHtmlList,
+} from "../dist/htmllist.js";
 import { applyDepths, parseBody, renderMarkdown } from "../dist/checklist.js";
 
 /**
@@ -132,5 +138,98 @@ describe("depth round trip", () => {
     const lines = applyDepths(parseBody(NESTED_BODY), []);
     const md = renderMarkdown(lines);
     assert.ok(!md.includes("    "), "expected no indentation");
+  });
+});
+
+describe("decodeEntities (malformed, no semicolon)", () => {
+  it("decodes entities Notes writes without a trailing semicolon", () => {
+    // Notes stores `&amp&amp` for `&&` and escapes markup as `&ltu&gt`.
+    // Requiring the semicolon left these undecoded, which broke alignment.
+    assert.equal(decodeEntities("Sheets &amp&amp Blankets"), "Sheets && Blankets");
+    assert.equal(decodeEntities("&ltu&gtx&lt/u&gt"), "<u>x</u>");
+  });
+
+  it("still decodes well-formed entities", () => {
+    assert.equal(decodeEntities("a &amp; b"), "a & b");
+  });
+});
+
+describe("parseHtmlBlocks", () => {
+  const HTML = [
+    "<div>The Title</div>",
+    "<div><b><h1>Big</h1></b></div>",
+    "<div><br></div>",
+    "<div>prose</div>",
+    "<div><h2>Medium</h2></div>",
+    "<ol>",
+    "<li>one</li>",
+    "<li>two</li>",
+    "</ol>",
+    "<ul>",
+    "<li>todo</li>",
+    "<ul><li>nested</li></ul>",
+    "</ul>",
+  ].join("\n");
+  const blocks = parseHtmlBlocks(HTML);
+
+  it("returns blocks in document order, title first", () => {
+    assert.equal(blocks[0].text, "The Title");
+    assert.deepEqual(
+      blocks.map((b) => b.kind),
+      ["text", "heading", "blank", "text", "heading", "item", "item", "item", "item"],
+    );
+  });
+
+  it("captures heading levels", () => {
+    assert.equal(blocks[1].level, 1);
+    assert.equal(blocks[4].level, 2);
+    assert.equal(blocks[3].level, 0);
+  });
+
+  it("marks ordered items and records list depth", () => {
+    const items = blocks.filter((b) => b.kind === "item");
+    assert.deepEqual(items.map((i) => i.ordered), [true, true, false, false]);
+    assert.deepEqual(items.map((i) => i.depth), [0, 0, 0, 1]);
+  });
+});
+
+describe("alignBlocks", () => {
+  const HTML = [
+    "<div>Title</div>",
+    "<div><h1>Head</h1></div>",
+    "<div><br></div>",
+    "<ul><li>a</li><ul><li>b</li></ul></ul>",
+  ].join("\n");
+  const lines = [
+    { text: "Head", isList: false },
+    { text: "", isList: false },
+    { text: "a", isList: true },
+    { text: "b", isList: true },
+  ];
+
+  it("recovers heading level and nesting depth together", () => {
+    const { structure, aligned } = alignBlocks(lines, parseHtmlBlocks(HTML));
+    assert.equal(aligned, true);
+    assert.deepEqual(structure.map((s) => s.headingLevel), [1, 0, 0, 0]);
+    assert.deepEqual(structure.map((s) => s.depth), [0, 0, 0, 1]);
+  });
+
+  it("tolerates the trailing blank line the bridge always emits", () => {
+    const withTrailing = [...lines, { text: "", isList: false }];
+    assert.equal(alignBlocks(withTrailing, parseHtmlBlocks(HTML)).aligned, true);
+  });
+
+  it("refuses when a line is a list item but its block is not", () => {
+    const swapped = [...lines];
+    swapped[0] = { text: "Head", isList: true };
+    assert.equal(alignBlocks(swapped, parseHtmlBlocks(HTML)).aligned, false);
+  });
+
+  it("refuses when text disagrees", () => {
+    const changed = [...lines];
+    changed[2] = { text: "different", isList: true };
+    const { structure, aligned } = alignBlocks(changed, parseHtmlBlocks(HTML));
+    assert.equal(aligned, false);
+    assert.ok(structure.every((s) => s.depth === 0 && s.headingLevel === 0));
   });
 });

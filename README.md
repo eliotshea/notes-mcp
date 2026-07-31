@@ -98,13 +98,20 @@ Notes does the Markdown conversion itself, so it round-trips cleanly:
 Reading a note back yields tab-delimited markers — `◦` unchecked, `✓` checked,
 `⁃` ordinary bullet — which the server parses into structured items for you.
 
-**Nested lists are preserved.** Apple's two APIs each tell half the story: the
-App Intents text carries checked state but flattens indentation, while the
-AppleScript HTML preserves indentation but has no state. The server reads both
-and merges them, so each item reports a `depth` and rebuilds reproduce the
-original nesting exactly. If the two sources ever disagree, tools report
-`nestingResolved: false` and refuse to rewrite rather than silently flattening
-your note.
+**Headings, numbered lists and nesting are preserved.** Apple's two APIs each tell half the story: the
+App Intents text carries checked state and list type but flattens indentation
+*and* strips heading levels, while the AppleScript HTML preserves structure but
+has no state. The server reads both and merges them by position, so `#`/`##`/`###`
+headings, `1.` numbered lists, and nesting all survive a rebuild. If the two
+sources disagree, tools report `nestingResolved: false` and refuse to rewrite
+rather than silently restructuring your note.
+
+**What cannot be preserved.** Notes' Markdown importer escapes raw HTML, and
+Markdown is the only write path that produces checkboxes — so **underline, text
+colour, highlight, block quotes and links are lost on rebuild**, along with
+attachments and tables. Rebuilding also trims trailing whitespace. Tools that
+rebuild refuse when they detect content they cannot reconstruct; pass
+`force: true` to override.
 
 ## Example
 
