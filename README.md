@@ -106,12 +106,20 @@ headings, `1.` numbered lists, and nesting all survive a rebuild. If the two
 sources disagree, tools report `nestingResolved: false` and refuse to rewrite
 rather than silently restructuring your note.
 
+**Inline styling survives too.** Bold, italic and strikethrough are recovered
+from the note's HTML and re-emitted as Markdown, so they round-trip.
+
 **What cannot be preserved.** Notes' Markdown importer escapes raw HTML, and
-Markdown is the only write path that produces checkboxes — so **underline, text
-colour, highlight, block quotes and links are lost on rebuild**, along with
-attachments and tables. Rebuilding also trims trailing whitespace. Tools that
-rebuild refuse when they detect content they cannot reconstruct; pass
-`force: true` to override.
+Markdown is the only write path that produces checkboxes — so **text colour,
+underline, block quotes and links are lost on rebuild**, along with attachments
+and tables. Rebuilding also trims trailing whitespace. Tools that rebuild
+**refuse and name exactly what would be lost**; pass `force: true` to override.
+
+**Highlighting is invisible.** Notes' highlight (coloured background) is absent
+from every API surface — AppleScript HTML, the App Intents body, RTF, HTML, and
+even a rendered PDF, all verified with text-colour and bold as positive
+controls. It cannot be detected, read, or written, so it is destroyed by any
+rebuild and every rebuild result carries a warning saying so.
 
 ## Example
 

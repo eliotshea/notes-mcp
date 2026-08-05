@@ -77,6 +77,52 @@ function textOf(html: string): string {
   return decodeEntities(html.replace(/<[^>]*>/g, "")).replace(/ /g, " ").trim();
 }
 
+/** Apply a Markdown delimiter, keeping surrounding spaces outside it. */
+function wrapInline(inner: string, delim: string): string {
+  const text = inner.replace(/<[^>]*>/g, "");
+  const m = text.match(/^(\s*)([\s\S]*?)(\s*)$/);
+  if (!m || !m[2]) return text;
+  return `${m[1]}${delim}${m[2]}${delim}${m[3]}`;
+}
+
+/**
+ * Convert a block's inline markup to Markdown.
+ *
+ * AppleScript's HTML carries `<b>`, `<i>` and `<strike>`, and Notes' Markdown
+ * importer round-trips all three -- they were lost on rebuild only because the
+ * renderer emitted plain text.
+ *
+ * Text colour (`<font color>`) is deliberately NOT emitted: Markdown cannot
+ * express it and the importer escapes raw HTML, so there is no way to write it
+ * back. `describeInlineLoss` reports it instead of pretending otherwise.
+ */
+export function inlineMarkdown(html: string): string {
+  let s = html
+    .replace(/<\/?(span|font|div|p)\b[^>]*>/gi, "")
+    .replace(/<br\s*\/?>/gi, "");
+
+  s = s
+    .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) => wrapInline(inner, "**"))
+    .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) => wrapInline(inner, "*"))
+    .replace(/<(s|strike|del)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) =>
+      wrapInline(inner, "~~"),
+    );
+
+  return textOf(s);
+}
+
+/** Inline constructs in a note's HTML that a rebuild cannot write back. */
+export function describeInlineLoss(html: string): string[] {
+  const lost: string[] = [];
+  const colours = html.match(/<font[^>]*color=/gi) ?? [];
+  if (colours.length) lost.push(`${colours.length} coloured text run(s)`);
+  if (/<u\b/i.test(html)) lost.push("underlined text");
+  if (/<a\b/i.test(html)) lost.push("links");
+  if (/<blockquote\b/i.test(html)) lost.push("block quotes");
+  return lost;
+}
+
+
 /**
  * A top-level block of a note's HTML, in document order.
  *
@@ -93,6 +139,8 @@ export interface HtmlBlock {
   depth: number;
   ordered: boolean;
   dashList: boolean;
+  /** The block's text with bold/italic/strike expressed as Markdown. */
+  markdown: string;
 }
 
 /**
@@ -129,6 +177,7 @@ export function parseHtmlBlocks(html: string): HtmlBlock[] {
         kind: "item",
         level: 0,
         text: textOf(liInner),
+        markdown: inlineMarkdown(liInner),
         depth: Math.max(0, stack.length - 1),
         ordered: top?.ordered ?? false,
         dashList: top?.dashList ?? false,
@@ -144,6 +193,7 @@ export function parseHtmlBlocks(html: string): HtmlBlock[] {
         kind: text === "" ? "blank" : heading ? "heading" : "text",
         level: heading ? Number(heading[1]) : 0,
         text,
+        markdown: inlineMarkdown(divInner),
         depth: 0,
         ordered: false,
         dashList: false,
@@ -204,6 +254,8 @@ export interface LineStructure {
   depth: number;
   /** 1-3 for headings, 0 otherwise. */
   headingLevel: number;
+  /** Text with bold/italic/strike as Markdown, or "" when unavailable. */
+  markdown: string;
 }
 
 /**
@@ -222,7 +274,7 @@ export function alignBlocks(
   bridgeLines: { text: string; isList: boolean }[],
   blocks: HtmlBlock[],
 ): { structure: LineStructure[]; aligned: boolean } {
-  const flat = bridgeLines.map(() => ({ depth: 0, headingLevel: 0 }));
+  const flat = bridgeLines.map(() => ({ depth: 0, headingLevel: 0, markdown: "" }));
   // The first block is the title, which the bridge omits.
   const body = blocks.length && blocks[0].kind !== "item" ? blocks.slice(1) : blocks;
 
@@ -247,7 +299,9 @@ export function alignBlocks(
   }
 
   const structure = flat.map((f, i) =>
-    i < n ? { depth: body[i].depth, headingLevel: body[i].level } : f,
+    i < n
+      ? { depth: body[i].depth, headingLevel: body[i].level, markdown: body[i].markdown }
+      : f,
   );
   return { structure, aligned: true };
 }

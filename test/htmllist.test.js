@@ -4,6 +4,8 @@ import {
   alignBlocks,
   alignDepths,
   decodeEntities,
+  describeInlineLoss,
+  inlineMarkdown,
   parseHtmlBlocks,
   parseHtmlList,
 } from "../dist/htmllist.js";
@@ -231,5 +233,43 @@ describe("alignBlocks", () => {
     const { structure, aligned } = alignBlocks(changed, parseHtmlBlocks(HTML));
     assert.equal(aligned, false);
     assert.ok(structure.every((s) => s.depth === 0 && s.headingLevel === 0));
+  });
+});
+
+describe("inlineMarkdown", () => {
+  it("converts the inline styles Notes can write back", () => {
+    assert.equal(inlineMarkdown("plain <b>bold</b> here"), "plain **bold** here");
+    assert.equal(inlineMarkdown("<i>it</i>"), "*it*");
+    assert.equal(inlineMarkdown("<strike>x</strike>"), "~~x~~");
+    assert.equal(inlineMarkdown("<em>e</em> <strong>s</strong>"), "*e* **s**");
+  });
+
+  it("keeps spaces outside the delimiters", () => {
+    // "**bold **" would not be parsed as bold by the importer.
+    assert.equal(inlineMarkdown("a <b>bold </b>b"), "a **bold** b");
+  });
+
+  it("drops colour rather than emitting unwritable markup", () => {
+    // Markdown cannot express colour and the importer escapes raw HTML, so
+    // emitting anything here would corrupt the note with literal tags.
+    assert.equal(inlineMarkdown('<font color="#FF0000">red</font>'), "red");
+  });
+
+  it("strips layout wrappers and decodes entities", () => {
+    assert.equal(inlineMarkdown('<span style="font-size: 11px">x &amp&amp y</span>'), "x && y");
+  });
+});
+
+describe("describeInlineLoss", () => {
+  it("names what a rebuild cannot write back", () => {
+    assert.deepEqual(describeInlineLoss('<font color="#FF0000">a</font>'), [
+      "1 coloured text run(s)",
+    ]);
+    assert.deepEqual(describeInlineLoss("<u>a</u>"), ["underlined text"]);
+    assert.deepEqual(describeInlineLoss('<a href="x">a</a>'), ["links"]);
+  });
+
+  it("reports nothing for styles that DO survive", () => {
+    assert.deepEqual(describeInlineLoss("<b>a</b> <i>b</i> <strike>c</strike>"), []);
   });
 });

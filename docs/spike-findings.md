@@ -418,6 +418,41 @@ difference is that Notes trims trailing whitespace (`"Dishes "` → `"Dishes"`).
   write can fail to find the note and fall back to an interactive picker.
   Creation polls until the note is visible.
 
+## 14. Highlighting is absent from every surface
+
+Tested on a purpose-built note with red text and bold as positive controls in
+the same output, so the negative result is not a broken pipeline:
+
+| surface | red text | bold | checkbox state | **highlight** |
+|---|---|---|---|---|
+| AppleScript `body` HTML | `<font color="#FF0505">` | `<b>` | — | **absent** |
+| bridge, plain text | — | — | `◦`/`✓` | **absent** |
+| bridge, raw RTF | `\cf2` + colour table | `HelveticaNeue-Bold` | `\listtext` | **absent** |
+| bridge, raw HTML | `p.p2 {color:#fb000b}` | `<b>` | `list-style-type: circle` | **absent** |
+| rendered PDF | `1 0 0.04313726 sc` | `/TT2` | stroked circle | **absent** |
+
+The PDF is the strongest evidence: it is a *visual* rendering, and the
+highlighted items get no fill rectangle at all. The attributed string handed to
+Shortcuts simply does not contain the attribute. Writing is symmetric --
+`background-color`, the `background` shorthand and `<mark>` are all stripped on
+the way in.
+
+Highlighting therefore cannot be detected, read, or written. Since it cannot
+even be detected, rebuild results carry a blanket warning rather than a
+per-note refusal.
+
+## 15. The bridge CAN carry inline styling
+
+`gettext` is what flattens colour and fonts, not Notes. A terminal
+`is.workflow.actions.setvariable` holding the `Body` property, read with
+`--output-type public.rtf` or `public.html`, preserves text colour and bold.
+
+In practice the AppleScript HTML is the more convenient source for inline
+styling -- it is already fetched on every read for nesting, and carries `<b>`,
+`<i>`, `<strike>` and `<font color>`. Bold, italic and strikethrough are
+re-emitted as Markdown so they survive rebuilds; colour is detected and
+reported as unpreservable.
+
 ## Remaining limitations
 
 1. No checklist-item enumeration action → state changes go through rebuild

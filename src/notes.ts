@@ -24,7 +24,7 @@ import {
   renderMarkdown,
   setChecked,
 } from "./checklist.js";
-import { alignBlocks, parseHtmlBlocks } from "./htmllist.js";
+import { alignBlocks, describeInlineLoss, parseHtmlBlocks } from "./htmllist.js";
 
 export class NoteNotFoundError extends Error {
   constructor(ref: string) {
@@ -79,13 +79,29 @@ export class RebuildFailedError extends Error {
 }
 
 export class RichContentError extends Error {
-  constructor(name: string) {
+  constructor(name: string, lost: string[]) {
     super(
-      `Note ${JSON.stringify(name)} contains attachments or tables, which a ` +
-        `checklist rebuild cannot reconstruct. Pass force: true to proceed anyway.`,
+      `Rebuilding ${JSON.stringify(name)} would lose ${lost.join(", ")}, which ` +
+        `cannot be written back through any Notes API. Pass force: true to ` +
+        `proceed and accept the loss.`,
     );
     this.name = "RichContentError";
   }
+}
+
+/**
+ * Everything a rebuild of this note would destroy.
+ *
+ * Bold, italic and strikethrough are NOT listed: they are recovered from the
+ * HTML and re-emitted as Markdown, so they survive. Text colour, underline,
+ * links and quotes cannot be written back because the Markdown importer
+ * escapes raw HTML.
+ */
+function describeLoss(html: string): string[] {
+  const lost = describeInlineLoss(html);
+  if (/<img\b/i.test(html)) lost.push("images");
+  if (/<table\b/i.test(html)) lost.push("tables");
+  return lost;
 }
 
 /**
@@ -231,7 +247,8 @@ async function rebuild(
   force: boolean,
 ): Promise<void> {
   const html = await as.getBodyHtml(note.id);
-  if (!force && as.htmlHasRichContent(html)) throw new RichContentError(note.name);
+  const lost = describeLoss(html);
+  if (!force && lost.length) throw new RichContentError(note.name, lost);
 
   const markdown = renderMarkdown(lines);
   if (!markdown.trim()) return; // nothing to write; leave the note alone
@@ -255,11 +272,32 @@ async function rebuild(
   }
 }
 
+/**
+ * Highlighting (Notes' background-colour feature) is invisible to every API
+ * available here. AppleScript's HTML silently drops `background-color`, `mark`
+ * and the `background` shorthand -- verified by writing all three and reading
+ * back nothing -- and the App Intents body is plain text.
+ *
+ * Text colour, by contrast, round-trips through AppleScript fine.
+ *
+ * Because highlighting cannot even be DETECTED, a rebuild cannot refuse for it
+ * specifically. Every rebuild therefore carries this warning, so highlighting is
+ * never lost silently.
+ */
+export const HIGHLIGHT_WARNING =
+  "Highlighting (coloured backgrounds) is invisible to every Notes API -- it is " +
+  "absent from AppleScript HTML, the App Intents body, RTF, HTML and even a " +
+  "rendered PDF -- so it cannot be detected or preserved, and any highlighting " +
+  "in this note has been removed. Bold, italic, strikethrough, headings, " +
+  "nesting, list types and checklist state are preserved.";
+
 export interface ChecklistChange {
   note: as.NoteMeta;
   before: ChecklistItem[];
   after: ChecklistItem[];
   changed: number;
+  /** Present only when the note was actually rewritten. */
+  warning?: string;
 }
 
 async function applyChecklistChange(
@@ -281,8 +319,10 @@ async function applyChecklistChange(
     .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked, depth: l.depth }));
   const changed = after.filter((a, i) => a.checked !== checklist[i]?.checked).length;
 
-  if (changed > 0) await rebuild(note, updated, force);
-  return { note, before: checklist, after, changed };
+  if (changed === 0) return { note, before: checklist, after, changed };
+
+  await rebuild(note, updated, force);
+  return { note, before: checklist, after, changed, warning: HIGHLIGHT_WARNING };
 }
 
 /** Uncheck every checklist item in a note. The workout-reset case. */
@@ -319,7 +359,8 @@ export async function replaceContent(
 ): Promise<as.NoteMeta> {
   const note = await resolveNote(ref);
   const html = await as.getBodyHtml(note.id);
-  if (!force && as.htmlHasRichContent(html)) throw new RichContentError(note.name);
+  const lost = describeLoss(html);
+  if (!force && lost.length) throw new RichContentError(note.name, lost);
 
   await as.clearBody(note.id, note.name, as.extractTitleHtml(html));
   if (markdown.trim()) {

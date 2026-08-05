@@ -45,6 +45,14 @@ export interface NoteLine {
    * the note's HTML by `applyStructure` and stays 0 until then.
    */
   headingLevel: number;
+  /**
+   * The line's text with bold/italic/strike expressed as Markdown.
+   *
+   * Recovered from the note's HTML, which is the only source that carries
+   * inline styling. Empty when unavailable, in which case `text` is used and
+   * the styling is lost -- so this is what makes bold survive a rebuild.
+   */
+  markdown: string;
 }
 
 export interface ChecklistItem {
@@ -96,6 +104,7 @@ export function parseBody(body: string): NoteLine[] {
           itemIndex: itemIndex++,
           ordinal: 0,
           headingLevel: 0,
+          markdown: "",
         });
         continue;
       }
@@ -108,6 +117,7 @@ export function parseBody(body: string): NoteLine[] {
         itemIndex: -1,
         ordinal: ord ? Number(ord[1]) : 0,
         headingLevel: 0,
+        markdown: "",
       });
       continue;
     }
@@ -120,6 +130,7 @@ export function parseBody(body: string): NoteLine[] {
       listIndex: -1,
       ordinal: 0,
       headingLevel: 0,
+      markdown: "",
     });
   }
   return out;
@@ -169,25 +180,26 @@ export function renderMarkdown(
 
     // Notes' Markdown importer nests a list item per four spaces of indent.
     const indent = "    ".repeat(Math.max(0, line.depth));
+    // Prefer the styled form so bold/italic/strike survive; fall back to plain
+    // text when no HTML was available to derive it from.
+    const body = line.markdown || escapeMarkdown(line.text);
 
     switch (line.kind) {
       case "checklist":
-        out.push(`${indent}- [${line.checked ? "x" : " "}] ${escapeMarkdown(line.text)}`);
+        out.push(`${indent}- [${line.checked ? "x" : " "}] ${body}`);
         break;
       case "bullet":
-        out.push(`${indent}- ${escapeMarkdown(line.text)}`);
+        out.push(`${indent}- ${body}`);
         break;
       case "ordered":
-        out.push(`${indent}${line.ordinal || 1}. ${escapeMarkdown(line.text)}`);
+        out.push(`${indent}${line.ordinal || 1}. ${body}`);
         break;
       case "blank":
         out.push("");
         break;
       case "text":
         out.push(
-          line.headingLevel > 0
-            ? `${"#".repeat(line.headingLevel)} ${escapeMarkdown(line.text)}`
-            : escapeMarkdown(line.text),
+          line.headingLevel > 0 ? `${"#".repeat(line.headingLevel)} ${body}` : body,
         );
         break;
     }
@@ -246,12 +258,13 @@ export function applyDepths(lines: NoteLine[], depths: number[]): NoteLine[] {
  */
 export function applyStructure(
   lines: NoteLine[],
-  structure: { depth: number; headingLevel: number }[],
+  structure: { depth: number; headingLevel: number; markdown?: string }[],
 ): NoteLine[] {
   if (structure.length !== lines.length) return lines;
   return lines.map((line, i) => ({
     ...line,
     depth: line.listIndex >= 0 ? structure[i].depth : 0,
     headingLevel: line.kind === "text" ? structure[i].headingLevel : 0,
+    markdown: structure[i].markdown ?? "",
   }));
 }
