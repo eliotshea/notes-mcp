@@ -23,15 +23,15 @@ import plist from "plist";
 
 const execFileAsync = promisify(execFile);
 
-const BUNDLE = "com.apple.Notes";
+export const BUNDLE = "com.apple.Notes";
 /** The object-replacement character Shortcuts uses as a variable placeholder. */
 const PLACEHOLDER = "￼";
 
-type Json = Record<string, unknown>;
+export type Json = Record<string, unknown>;
 
-const newUuid = () => randomUUID().toUpperCase();
+export const newUuid = () => randomUUID().toUpperCase();
 
-const descriptor = (intent: string, requiresApp = false): Json => ({
+export const descriptor = (intent: string, requiresApp = false): Json => ({
   TeamIdentifier: "0000000000",
   BundleIdentifier: BUNDLE,
   Name: "Notes",
@@ -40,19 +40,19 @@ const descriptor = (intent: string, requiresApp = false): Json => ({
 });
 
 /** A whole text field consisting of the shortcut's input. */
-const shortcutInputText = (): Json => ({
+export const shortcutInputText = (): Json => ({
   Value: { string: PLACEHOLDER, attachmentsByRange: { "{0, 1}": { Type: "ExtensionInput" } } },
   WFSerializationType: "WFTextTokenString",
 });
 
 /** The shortcut's input as a non-text parameter. */
-const shortcutInputAttachment = (): Json => ({
+export const shortcutInputAttachment = (): Json => ({
   Value: { Type: "ExtensionInput" },
   WFSerializationType: "WFTextTokenAttachment",
 });
 
 /** Reference a previous action's output as a non-text parameter. */
-const outputAttachment = (uuid: string, name: string, property?: string): Json => ({
+export const outputAttachment = (uuid: string, name: string, property?: string): Json => ({
   Value: {
     OutputUUID: uuid,
     Type: "ActionOutput",
@@ -65,7 +65,7 @@ const outputAttachment = (uuid: string, name: string, property?: string): Json =
 });
 
 /** Reference a previous action's output inside a text field. */
-const outputText = (uuid: string, name: string, property?: string): Json => ({
+export const outputText = (uuid: string, name: string, property?: string): Json => ({
   Value: {
     string: PLACEHOLDER,
     attachmentsByRange: {
@@ -86,7 +86,7 @@ const outputText = (uuid: string, name: string, property?: string): Json => ({
   WFSerializationType: "WFTextTokenString",
 });
 
-const getValueForKey = (uuid: string, key: string): Json => ({
+export const getValueForKey = (uuid: string, key: string): Json => ({
   WFWorkflowActionIdentifier: "is.workflow.actions.getvalueforkey",
   WFWorkflowActionParameters: {
     WFInput: shortcutInputAttachment(),
@@ -97,7 +97,7 @@ const getValueForKey = (uuid: string, key: string): Json => ({
 });
 
 /** Find a note by exact name. `nameValue` is a serialized text field. */
-const findNoteByName = (uuid: string, nameValue: Json): Json => ({
+export const findNoteByName = (uuid: string, nameValue: Json): Json => ({
   WFWorkflowActionIdentifier: "is.workflow.actions.filter.notes",
   WFWorkflowActionParameters: {
     AppIntentDescriptor: descriptor("NoteEntity", true),
@@ -123,17 +123,17 @@ const findNoteByName = (uuid: string, nameValue: Json): Json => ({
   },
 });
 
-const getText = (uuid: string, value: Json): Json => ({
+export const getText = (uuid: string, value: Json): Json => ({
   WFWorkflowActionIdentifier: "is.workflow.actions.gettext",
   WFWorkflowActionParameters: { WFTextActionText: value, UUID: uuid },
 });
 
-const notesAction = (uuid: string, intent: string, params: Json): Json => ({
+export const notesAction = (uuid: string, intent: string, params: Json): Json => ({
   WFWorkflowActionIdentifier: `${BUNDLE}.${intent}`,
   WFWorkflowActionParameters: { AppIntentDescriptor: descriptor(intent), UUID: uuid, ...params },
 });
 
-function workflow(actions: Json[]): Json {
+export function workflow(actions: Json[]): Json {
   return {
     WFWorkflowClientVersion: "4610",
     WFWorkflowMinimumClientVersion: 900,

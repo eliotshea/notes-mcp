@@ -71,7 +71,7 @@ export async function duplicateShortcuts(): Promise<string[]> {
  * picker; headless that surfaces as "Running was cancelled", which almost
  * always means the note name did not match anything.
  */
-async function runShortcut(name: string, args: Record<string, string>): Promise<string> {
+export async function runShortcut(name: string, args: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "notes-mcp-run-"));
   const inPath = join(dir, "in.json");
   const outPath = join(dir, "out.txt");
