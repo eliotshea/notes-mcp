@@ -18,6 +18,9 @@ This absorbs all seven refinements from the earlier review; §7 maps each one.
 
 ---
 
+> **Status: Parts 1–6 assume the current two-primitive world. That assumption is
+> now in doubt — see Part 8, which may remove the need for most of this.**
+
 ## Part 1 — What the primitives can actually do
 
 Re-verified on macOS 15.5 during planning. Two rows are **new** and one
@@ -292,3 +295,67 @@ sits almost entirely in Phase 3.
 | 5 | Stop leaking bridge mechanics in errors | Phase 3 — error rewrite |
 | 6 | Specify the input dialect | Phase 4 — `docs/dialect.md`, normative |
 | 7 | Stale `folderId` bug | Phase 0 |
+
+---
+
+## Part 8 — The rebuild may not be necessary at all
+
+Everything above is built on `spike-findings.md` §10: *"Per-item toggling is
+still not directly available (no checklist-item Find action), so state changes
+are applied by rebuild."* Every loss in this document descends from that one
+sentence.
+
+**That premise appears to be false on macOS 15.5.** Enumerating Notes' App
+Intents metadata directly:
+
+```
+/System/Applications/Notes.app/Contents/Resources/Metadata.appintents/extract.actionsdata
+```
+
+turns up 45 `LinkAction` intents, of which the bridge uses exactly two
+(`AppendMarkdownToNoteLinkAction`, `CreateNoteFromMarkdownLinkAction`). Among
+the unused:
+
+| Intent | Would replace |
+|---|---|
+| `SetChecklistItemsCheckedIntent` | **the entire rebuild path** |
+| `CreateChecklistItemLinkAction` | rebuild-to-add-an-item |
+| `DeleteChecklistItemsLinkAction` | rebuild-to-remove-an-item |
+| `AppendToNoteLinkAction` | Markdown-only append — may carry rich text |
+| `ApplyFormattingLinkAction` | colour/underline writes |
+| `SetParagraphStyleLinkAction` | Caption, Subheading, Monostyled |
+| `CreateTableLinkAction`, `AddFileAttachmentLinkAction` | table/attachment loss |
+
+And decisively, `ChecklistItemEntity` exists as a first-class entity **with a
+query**: `VisibleChecklistItemsQuery`. §10's "no checklist-item Find action" is
+exactly what that query would provide.
+
+If `SetChecklistItemsCheckedIntent` is drivable from a Shortcut headlessly, then
+checking an item stops being a whole-note rewrite. Nothing is cleared, nothing
+is re-appended, and therefore **nothing is lost** — colour, underline, links,
+quotes, highlighting, images and tables all survive because they are never
+touched. Rules 3–7, the conflict refusals, the `on_conflict` parameter and most
+of the `lost` array all become dead code.
+
+### The risk
+
+`VisibleChecklistItemsQuery` — "Visible" may mean *visible in the UI*, in which
+case it is no more reachable headlessly than `ApplyFormattingIntent` or
+`ReplaceSelectionIntent`, which §12 already found act on the UI selection. The
+intents unambiguously exist; whether they resolve entities without a foreground
+window is untested.
+
+### Spike before building any of Parts 1–6
+
+1. Build a shortcut wiring `VisibleChecklistItemsQuery` → filter by note →
+   `SetChecklistItemsCheckedIntent`, following the runtime-parameter pattern
+   already proven in `wfbuild.ts` and `spike-findings.md` §8.
+2. Run it via `shortcuts run` with no Notes window open.
+3. If it toggles state headlessly, **stop and redesign**: the dialect (Part 2)
+   is still worth building for reads and full-document writes, but the planner
+   (Part 3) shrinks to a fast path plus a fallback, and the checklist tools
+   become thin wrappers over real per-item intents.
+4. If it needs the UI, this document stands as written and §10 stands with it.
+
+This spike is cheap relative to Phases 1–3 and determines whether they are worth
+doing. It should happen first.
