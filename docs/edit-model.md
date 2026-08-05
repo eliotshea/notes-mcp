@@ -378,10 +378,39 @@ items becomes a genuine per-item intent rather than a Markdown append, which
 also removes the list-merging quirk where an appended item joins a preceding
 dash list.
 
-### Still worth trying
+### The setter does work — but only on items it just created
 
-`CreateChecklistItemLinkAction` returns the entity it created. If that output
-can feed `SetChecklistItemCheckedLinkActionv2`'s `entities`, then **appending an
-already-checked item** works without a rebuild, even though checking an existing
-one does not. Worth one more shortcut; it is the last unexplored path to a
-headless setter.
+Tested: feeding `CreateChecklistItemLinkAction`'s output straight into
+`SetChecklistItemCheckedLinkActionv2` appends an **already-checked** item, with
+no rebuild and no picker. So the setter is not UI-bound. The blocker was never
+the intent; it is obtaining a `ChecklistItemEntity` for an item that already
+exists.
+
+And that is now closed. Exactly two actions in the whole bundle output a
+`ChecklistItemEntity`:
+
+| Action | Produces |
+|---|---|
+| `CreateChecklistItemLinkAction` | a **newly created** item |
+| `SetChecklistItemCheckedLinkActionv2` | the items it just set — circular |
+
+There is no read path. Combined with the query having no property-filter
+capability and text resolution falling back to a picker, **every route to a
+pre-existing checklist item is exhausted.** `spike-findings.md` §10 is now
+*proven* for checked state rather than merely assumed, and the rebuild stays.
+
+### What this actually buys — less than it first appears
+
+Appending a checked item was *already* free: `appendMarkdown` accepts `- [x]`
+and does not rewrite what sits above it. So the intent path adds no
+rebuild-avoidance for appends.
+
+Its real advantage is **escaping**. Markdown append re-parses item text, so an
+item reading `1. buy milk`, `# groceries` or `**urgent**` is reinterpreted as a
+numbered list, a heading or bold. §12 already records this class of bug biting
+once: `escapeMarkdown` turned `1. first` into `\1. first` and corrupted every
+numbered-list note on rebuild. `CreateChecklistItemLinkAction` takes the text as
+a **parameter**, never as markup, which removes the entire class.
+
+So: use the intent for appending items — for correctness, not for performance —
+and keep the rebuild for changing state on items that already exist.

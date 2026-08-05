@@ -184,8 +184,78 @@ function buildSetCheckedByText(scopeToNote: boolean): () => Json {
   };
 }
 
+/**
+ * Append an already-checked item, with no rebuild and no picker.
+ *
+ * The last unexplored route to a headless setter. Nothing here is guessed:
+ *
+ *   CreateChecklistItemLinkAction  outputType  -> entity ChecklistItemEntity
+ *   ChecklistItemEntity            displayTypeName -> "Checklist Item"
+ *   SetChecklistItemCheckedLinkActionv2 entities -> [ChecklistItemEntity]
+ *
+ * So the create action's own output is exactly the type the setter needs, which
+ * sidesteps the query that has no filter action. This cannot check a
+ * pre-existing item -- only one created in the same run -- but if it works,
+ * "append a done item" costs no rewrite.
+ *
+ * Input: {"note": "<exact name>", "text": "<item text>"}
+ */
+function buildAppendChecked(): Json {
+  const noteKey = newUuid();
+  const textKey = newUuid();
+  const find = newUuid();
+  const create = newUuid();
+  return workflow([
+    getValueForKey(noteKey, "note"),
+    getValueForKey(textKey, "text"),
+    findNoteByName(find, outputText(noteKey, "Dictionary Value")),
+    notesAction(create, "CreateChecklistItemLinkAction", {
+      name: outputText(textKey, "Dictionary Value"),
+      noteEntity: outputAttachment(find, "Note"),
+    }),
+    notesAction(newUuid(), "SetChecklistItemCheckedLinkActionv2", {
+      changeOperation: "check",
+      entities: outputAttachment(create, "Checklist Item"),
+      note: outputAttachment(find, "Note"),
+    }),
+  ]);
+}
+
 export const SPIKE_SET_C = "notes-mcp-spike-set-checked-c";
 export const SPIKE_SET_D = "notes-mcp-spike-set-checked-d";
+export const SPIKE_APPEND_CHECKED = "notes-mcp-spike-append-checked";
+
+/**
+ * Run a spike shortcut with a hard timeout.
+ *
+ * An unresolvable App Intents parameter makes Shortcuts raise an interactive
+ * picker, which blocks `shortcuts run` forever. The shipping bridge has no
+ * timeout because its shortcuts are known-good; a probe needs one so a picker
+ * costs 20 seconds rather than the whole session.
+ */
+async function runProbe(name: string, args: Record<string, string>): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "notes-mcp-probe-"));
+  const inPath = join(dir, "in.json");
+  const outPath = join(dir, "out.txt");
+  await writeFile(inPath, JSON.stringify(args), "utf8");
+  try {
+    await execFileAsync(
+      "shortcuts",
+      ["run", name, "-i", inPath, "-o", outPath, "--output-type", "public.plain-text"],
+      { timeout: 20_000, killSignal: "SIGKILL" },
+    );
+    return "";
+  } catch (e) {
+    const err = e as { killed?: boolean; message?: string };
+    if (err.killed) {
+      throw new Error(
+        "timed out after 20s -- almost certainly an interactive picker, " +
+          "meaning a parameter could not be resolved headlessly",
+      );
+    }
+    throw new Error(err.message ?? String(e));
+  }
+}
 
 const SPIKE_BUILDERS: Record<string, () => Json> = {
   [SPIKE_ADD]: buildAddItem,
@@ -202,7 +272,16 @@ const SPIKE_BUILDERS: Record<string, () => Json> = {
   // from text, with and without a note to scope the search.
   [SPIKE_SET_C]: buildSetCheckedByText(true),
   [SPIKE_SET_D]: buildSetCheckedByText(false),
+  // E feeds the create action's own output into the setter.
+  [SPIKE_APPEND_CHECKED]: buildAppendChecked,
 };
+
+/**
+ * A and B fail with "an action could not be found"; C and D raise a picker.
+ * They stay in the file as the record of what was ruled out, but re-running
+ * them only costs another blocked dialog.
+ */
+const RETIRED = new Set([SPIKE_SET_A, SPIKE_SET_B, SPIKE_SET_C, SPIKE_SET_D]);
 
 async function generate(dir: string, only: string[]): Promise<string[]> {
   const paths: string[] = [];
@@ -253,7 +332,7 @@ async function main() {
   console.log(`\n${BOLD}Spike: per-item checklist intents${RESET}\n`);
 
   const before = await installed();
-  const missing = Object.keys(SPIKE_BUILDERS).filter((n) => !before.has(n));
+  const missing = Object.keys(SPIKE_BUILDERS).filter((n) => !RETIRED.has(n) && !before.has(n));
 
   if (missing.length) {
     const dir = await mkdtemp(join(tmpdir(), "notes-mcp-spike-"));
@@ -303,51 +382,46 @@ async function main() {
 
   // ---------------------------------------------------------------- test 2
   console.log(`\n${BOLD}2. SetChecklistItemCheckedLinkActionv2${RESET} ${DIM}(the payoff)${RESET}`);
-  const results: Record<string, string> = {};
-  for (const [label, name] of [
-    ["guess A  find via com.apple.Notes.ChecklistItemEntity", SPIKE_SET_A],
-    ["guess B  find via is.workflow.actions.filter.checklistitems", SPIKE_SET_B],
-    ["guess C  entities as text, scoped to note", SPIKE_SET_C],
-    ["guess D  entities as text, unscoped", SPIKE_SET_D],
-  ] as const) {
-    await resetNote();
-    try {
-      await runShortcut(name, { note: NOTE, text: "alpha" });
-      await sleep(600);
-      const after = await readItems();
-      const alpha = after.find((i) => i.text === "alpha");
-      if (alpha?.checked) {
-        pass(`${label} -- CHECKED IT`);
-        results[name] = "works";
-      } else {
-        fail(`${label} -- ran, but alpha is still unchecked`);
-        results[name] = "silent no-op";
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      fail(`${label} -- ${msg.split("\n")[0]}`);
-      results[name] = "error";
+  console.log(
+    `   ${DIM}already ruled out: A,B "action could not be found"; ` +
+      `C,D interactive picker${RESET}`,
+  );
+  let setWorks = false;
+  await resetNote();
+  try {
+    await runProbe(SPIKE_APPEND_CHECKED, { note: NOTE, text: "delta" });
+    await sleep(800);
+    const after = await readItems();
+    const delta = after.find((i) => i.text === "delta");
+    if (delta?.checked) {
+      pass(`appended "delta" ALREADY CHECKED -- no rebuild, no picker`);
+      setWorks = true;
+    } else if (delta) {
+      fail(`item was appended but is unchecked -- the setter silently no-opped`);
+    } else {
+      fail(`no item appeared at all (${after.map((i) => i.text).join(", ")})`);
     }
+  } catch (e) {
+    fail(`${e instanceof Error ? e.message : String(e)}`);
   }
 
   // ---------------------------------------------------------------- verdict
   console.log(`\n${BOLD}Verdict${RESET}`);
-  const setWorks = Object.values(results).includes("works");
   if (setWorks) {
     console.log(
-      `  ${GREEN}The rebuild is unnecessary for checked-state changes.${RESET}\n` +
-        `  Rewrite docs/edit-model.md around per-item intents: nothing is\n` +
-        `  cleared, so colour, underline, images, tables and highlighting all\n` +
-        `  survive a check/uncheck untouched.`,
+      `  ${GREEN}Appending a checked item costs no rebuild.${RESET}\n` +
+        `  The setter IS drivable when the entity comes from the create action\n` +
+        `  in the same run. Checking a PRE-EXISTING item is still out of reach,\n` +
+        `  so rebuild stays for that -- but "add a done item" stops rewriting\n` +
+        `  the note, and images, tables, colour and highlighting survive it.`,
     );
   } else if (addWorks) {
     console.log(
-      `  ${YELLOW}Partial.${RESET} The intent family IS reachable headlessly --\n` +
-        `  adding an item needs no rebuild -- but neither Find-action guess\n` +
-        `  resolved ChecklistItemEntity. The blocker is the Find action's\n` +
-        `  identifier, not the intents. Next: build a Find Checklist Items\n` +
-        `  action in the Shortcuts editor by hand and decode it with\n` +
-        `  scripts/unshortcut.py to read the real identifier off it.`,
+      `  ${YELLOW}Adding works; setting state does not, by any route tried.${RESET}\n` +
+        `  ChecklistItemEntity cannot be produced headlessly -- not from a Find\n` +
+        `  action (none exists), not from text, and not from the create action's\n` +
+        `  own output. spike-findings §10 stands for checked state; only its\n` +
+        `  claim about appends was wrong.`,
     );
   } else {
     console.log(
