@@ -18,13 +18,18 @@ import {
   type ChecklistItem,
   type NoteLine,
   applyStructure,
-  matchByIndex,
-  matchByText,
   parseBody,
-  renderMarkdown,
-  setChecked,
 } from "./checklist.js";
-import { alignBlocks, describeInlineLoss, parseHtmlBlocks } from "./htmllist.js";
+import { alignBlocks, parseHtmlBlocks } from "./htmllist.js";
+import {
+  type DialectLine,
+  dialectToMarkdown,
+  lineToHtml,
+  linesToMarkdown,
+  parseDialect,
+  renderDialect,
+} from "./dialect.js";
+import { type OnConflict, type WritePlan, planWrite } from "./plan.js";
 
 export class NoteNotFoundError extends Error {
   constructor(ref: string) {
@@ -36,21 +41,10 @@ export class NoteNotFoundError extends Error {
 export class AmbiguousNoteError extends Error {
   constructor(name: string, count: number) {
     super(
-      `${count} notes are named ${JSON.stringify(name)}. ` +
-        `The Notes bridge addresses notes by name, so rename one or pass a note id.`,
+      `${count} notes are named ${JSON.stringify(name)}. Pass a note id instead, ` +
+        `or rename one of them.`,
     );
     this.name = "AmbiguousNoteError";
-  }
-}
-
-export class NestingUnresolvedError extends Error {
-  constructor(name: string) {
-    super(
-      `Could not recover list nesting for ${JSON.stringify(name)}, so rewriting it ` +
-        `would flatten indented items. This happens when the note's HTML and its ` +
-        `App Intents text disagree. Pass force: true to rebuild it flat anyway.`,
-    );
-    this.name = "NestingUnresolvedError";
   }
 }
 
@@ -78,30 +72,37 @@ export class RebuildFailedError extends Error {
   }
 }
 
-export class RichContentError extends Error {
-  constructor(name: string, lost: string[]) {
-    super(
-      `Rebuilding ${JSON.stringify(name)} would lose ${lost.join(", ")}, which ` +
-        `cannot be written back through any Notes API. Pass force: true to ` +
-        `proceed and accept the loss.`,
-    );
-    this.name = "RichContentError";
-  }
+/**
+ * Content that no write path can reconstruct, so a rewrite must be refused
+ * rather than merely warned about.
+ *
+ * Distinct from `describeLoss`: colour and underline appear there but not here,
+ * because the HTML write phase CAN reproduce them (docs/edit-model.md Part 1).
+ */
+function describeOpaque(html: string): string[] {
+  const opaque: string[] = [];
+  if (/<img\b/i.test(html)) opaque.push("images");
+  if (/<table\b/i.test(html)) opaque.push("tables");
+  return opaque;
 }
 
 /**
- * Everything a rebuild of this note would destroy.
+ * Wait until the bridge can see the note again.
  *
- * Bold, italic and strikethrough are NOT listed: they are recovered from the
- * HTML and re-emitted as Markdown, so they survive. Text colour, underline,
- * links and quotes cannot be written back because the Markdown importer
- * escapes raw HTML.
+ * App Intents indexes a note slightly after AppleScript writes its body, and a
+ * bridge call that lands in that window falls back to an interactive picker
+ * (spike-findings §13). Every plan that writes HTML and then appends Markdown
+ * crosses exactly that boundary.
  */
-function describeLoss(html: string): string[] {
-  const lost = describeInlineLoss(html);
-  if (/<img\b/i.test(html)) lost.push("images");
-  if (/<table\b/i.test(html)) lost.push("tables");
-  return lost;
+async function settle(noteName: string): Promise<void> {
+  for (let i = 0; i < 12; i++) {
+    try {
+      await bridge.readBody(noteName);
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
 }
 
 /**
@@ -127,6 +128,8 @@ export interface NoteContent {
   note: as.NoteMeta;
   /** Plain text with ◦ / ✓ / ⁃ markers, exactly as the bridge returned it. */
   raw: string;
+  /** The note as editable dialect text; what `writeNote` accepts back. */
+  dialect: string;
   lines: NoteLine[];
   checklist: ChecklistItem[];
   /**
@@ -134,6 +137,10 @@ export interface NoteContent {
    * reported at depth 0 and a rebuild would flatten the note.
    */
   nestingResolved: boolean;
+  /** Content a rewrite cannot recreate, e.g. "images". */
+  opaque: string[];
+  /** The note's HTML, kept so a write can restore it after a failed rebuild. */
+  html: string;
 }
 
 /**
@@ -169,7 +176,16 @@ export async function readNote(ref: string): Promise<NoteContent> {
       depth: l.depth,
     }));
 
-  return { note, raw, lines, checklist, nestingResolved };
+  return {
+    note,
+    raw,
+    dialect: renderDialect(lines),
+    lines,
+    checklist,
+    nestingResolved,
+    opaque: describeOpaque(html),
+    html,
+  };
 }
 
 /** Read just the checklist items of a note. */
@@ -232,37 +248,88 @@ export async function createNote(
 
   if (folder && note.folder !== folder) {
     await as.moveNote(note.id, folder);
-    return { ...note, folder };
+    // Re-resolve rather than patching `folder` onto stale metadata: `folderId`
+    // would keep pointing at the folder the note was created in, so the same
+    // note reported a different folder from create_note than from list_notes.
+    return resolveNote(note.id);
   }
   return note;
 }
 
+export interface WriteResult {
+  note: as.NoteMeta;
+  /** Which rule the planner picked; useful for debugging, not for callers. */
+  rule: string;
+  /** False when the note's existing content was left in place. */
+  rewrote: boolean;
+  preserved: string[];
+  lost: string[];
+  /** Present only for a dry run. */
+  dryRun?: true;
+}
+
+export class WriteRefusedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "WriteRefusedError";
+  }
+}
+
 /**
- * Rewrite a note from parsed lines, preserving its identity.
- * This is the shared mechanism behind every checked-state change.
+ * Run a write plan against a note.
+ *
+ * Any step that clears or replaces the body is recoverable: the original HTML
+ * is captured first and put back if a later step fails. The restore cannot
+ * recreate checkboxes, so the error says so rather than implying the note is
+ * untouched.
  */
-async function rebuild(
+async function executePlan(
   note: as.NoteMeta,
-  lines: NoteLine[],
-  force: boolean,
+  plan: WritePlan,
+  html: string,
 ): Promise<void> {
-  const html = await as.getBodyHtml(note.id);
-  const lost = describeLoss(html);
-  if (!force && lost.length) throw new RichContentError(note.name, lost);
-
-  const markdown = renderMarkdown(lines);
-  if (!markdown.trim()) return; // nothing to write; leave the note alone
-
-  // Keep the title's original markup: Notes styles a written body purely from
-  // its markup, so synthesising <div>{title}</div> demotes an <h1> title to
-  // body size and it renders tiny.
-  await as.clearBody(note.id, note.name, as.extractTitleHtml(html));
+  const titleHtml = as.extractTitleHtml(html) ?? `<div>${note.name}</div>`;
+  let destructive = false;
 
   try {
-    await bridge.appendMarkdown(note.name, markdown);
+    for (const op of plan.ops) {
+      switch (op.kind) {
+        case "clear-body":
+          destructive = true;
+          await as.clearBody(note.id, note.name, titleHtml);
+          await settle(note.name);
+          break;
+
+        case "set-html": {
+          destructive = true;
+          const body = op.lines.map(lineToHtml).join("\n");
+          await as.setBodyHtml(note.id, `${titleHtml}\n${body}`);
+          await settle(note.name);
+          break;
+        }
+
+        case "append-markdown": {
+          const md = linesToMarkdown(op.lines);
+          if (md.trim()) await bridge.appendMarkdown(note.name, md);
+          break;
+        }
+
+        case "append-checklist-items":
+          for (const l of op.lines) {
+            const done = await bridge.addChecklistItem(
+              note.name,
+              dialectToMarkdown(l.text),
+              l.checked,
+            );
+            // The per-item intent is optional. Without it a Markdown append
+            // produces the same item; only the escaping guarantee is weaker.
+            if (!done) await bridge.appendMarkdown(note.name, linesToMarkdown([l]));
+          }
+          break;
+      }
+    }
   } catch (e) {
-    // The body is currently empty. Put the original content back rather than
-    // leaving the note holding only its title.
+    if (!destructive) throw e;
     try {
       await as.setBodyHtml(note.id, html);
     } catch {
@@ -273,6 +340,73 @@ async function rebuild(
 }
 
 /**
+ * Replace a note's content with new dialect text.
+ *
+ * The caller supplies text and nothing else: which primitives run, and whether
+ * anything is rewritten at all, is the planner's decision. A `dry_run` returns
+ * the same report without writing, so the cost of an edit can be inspected
+ * before committing to it.
+ */
+export async function writeNote(
+  ref: string,
+  content: string,
+  opts: { onConflict?: OnConflict; dryRun?: boolean } = {},
+): Promise<WriteResult> {
+  const current = await readNote(ref);
+  const target = parseDialect(content);
+
+  const plan = planWrite(
+    {
+      lines: parseDialect(current.dialect),
+      opaque: current.opaque,
+      nestingResolved: current.nestingResolved,
+    },
+    target,
+    opts.onConflict ?? "refuse",
+  );
+
+  if (plan.refusal) throw new WriteRefusedError(plan.refusal);
+
+  const report: WriteResult = {
+    note: current.note,
+    rule: plan.rule,
+    rewrote: plan.rewrote,
+    preserved: plan.preserved,
+    lost: plan.lost,
+  };
+  if (opts.dryRun) return { ...report, dryRun: true };
+
+  await executePlan(current.note, plan, current.html);
+  return report;
+}
+
+/** Append dialect text to a note, leaving everything above it untouched. */
+export async function appendContent(ref: string, content: string): Promise<WriteResult> {
+  const current = await readNote(ref);
+  const existing = parseDialect(current.dialect);
+  const target = [...existing, ...parseDialect(content)];
+  return writeNote(ref, renderDialectLines(target));
+}
+
+/** Render already-parsed dialect lines back to text. */
+function renderDialectLines(lines: DialectLine[]): string {
+  return renderDialect(
+    lines.map((l) => ({
+      kind: l.kind === "heading" ? ("text" as const) : l.kind,
+      text: l.text,
+      checked: l.checked,
+      itemIndex: -1,
+      depth: l.depth,
+      listIndex: -1,
+      ordinal: l.ordinal,
+      headingLevel: l.headingLevel,
+      markdown: "",
+      dialect: l.text,
+    })),
+  );
+}
+
+/**
  * Highlighting (Notes' background-colour feature) is invisible to every API
  * available here. AppleScript's HTML silently drops `background-color`, `mark`
  * and the `background` shorthand -- verified by writing all three and reading
@@ -280,100 +414,141 @@ async function rebuild(
  *
  * Text colour, by contrast, round-trips through AppleScript fine.
  *
- * Because highlighting cannot even be DETECTED, a rebuild cannot refuse for it
- * specifically. Every rebuild therefore carries this warning, so highlighting is
- * never lost silently.
+ * Because highlighting cannot even be DETECTED, no write can refuse for it
+ * specifically, so every rewrite reports it in `lost`. The full account of what
+ * was tested lives in the README rather than in every response payload.
  */
-export const HIGHLIGHT_WARNING =
-  "Highlighting (coloured backgrounds) is invisible to every Notes API -- it is " +
-  "absent from AppleScript HTML, the App Intents body, RTF, HTML and even a " +
-  "rendered PDF -- so it cannot be detected or preserved, and any highlighting " +
-  "in this note has been removed. Bold, italic, strikethrough, headings, " +
-  "nesting, list types and checklist state are preserved.";
+export const HIGHLIGHT_LOSS = "highlighting (undetectable, so never preserved by a rewrite)";
 
 export interface ChecklistChange {
   note: as.NoteMeta;
   before: ChecklistItem[];
   after: ChecklistItem[];
   changed: number;
-  /** Present only when the note was actually rewritten. */
-  warning?: string;
+  rewrote: boolean;
+  preserved: string[];
+  lost: string[];
 }
 
+/** What to change about the matched checklist items. */
+export interface ChecklistUpdate {
+  checked?: boolean | "toggle";
+  /** Absolute depth, or a relative `"+1"` / `"-1"`. */
+  depth?: number | string;
+  text?: string;
+}
+
+function resolveDepth(current: number, spec: number | string | undefined): number {
+  if (spec === undefined) return current;
+  if (typeof spec === "number") return Math.max(0, spec);
+  const m = spec.match(/^([+-])(\d+)$/);
+  if (!m) {
+    const n = Number(spec);
+    return Number.isFinite(n) ? Math.max(0, n) : current;
+  }
+  const delta = Number(m[2]) * (m[1] === "-" ? -1 : 1);
+  return Math.max(0, current + delta);
+}
+
+/**
+ * Apply an update to the checklist items a predicate selects.
+ *
+ * Everything routes through `writeNote`, so these tools inherit the planner's
+ * behaviour: notes holding an image are refused with a reason rather than
+ * silently flattened, and the caller never learns which primitives ran.
+ */
 async function applyChecklistChange(
   ref: string,
-  predicate: (line: NoteLine) => boolean,
-  value: boolean | "toggle",
-  force: boolean,
+  predicate: (index: number, text: string) => boolean,
+  update: ChecklistUpdate,
+  onConflict: OnConflict,
 ): Promise<ChecklistChange> {
-  const { note, lines, checklist, nestingResolved } = await readNote(ref);
+  const current = await readNote(ref);
+  const lines = parseDialect(current.dialect);
 
-  // A rebuild rewrites the whole note, so unrecoverable nesting would silently
-  // flatten it. Refuse rather than damage the note's structure.
-  if (!nestingResolved && !force) throw new NestingUnresolvedError(note.name);
+  let itemIndex = 0;
+  const updated = lines.map((line) => {
+    if (line.kind !== "checklist") return line;
+    const i = itemIndex++;
+    if (!predicate(i, line.text)) return line;
+    return {
+      ...line,
+      checked:
+        update.checked === undefined
+          ? line.checked
+          : update.checked === "toggle"
+            ? !line.checked
+            : update.checked,
+      depth: resolveDepth(line.depth, update.depth),
+      text: update.text ?? line.text,
+    };
+  });
 
-  const updated = setChecked(lines, predicate, value);
+  const toItems = (ls: DialectLine[]): ChecklistItem[] => {
+    let n = 0;
+    return ls
+      .filter((l) => l.kind === "checklist")
+      .map((l) => ({ index: n++, text: l.text, checked: l.checked, depth: l.depth }));
+  };
 
-  const after = updated
-    .filter((l) => l.kind === "checklist")
-    .map((l) => ({ index: l.itemIndex, text: l.text, checked: l.checked, depth: l.depth }));
-  const changed = after.filter((a, i) => a.checked !== checklist[i]?.checked).length;
+  const before = toItems(lines);
+  const after = toItems(updated);
+  const changed = after.filter(
+    (a, i) =>
+      a.checked !== before[i]?.checked ||
+      a.depth !== before[i]?.depth ||
+      a.text !== before[i]?.text,
+  ).length;
 
-  if (changed === 0) return { note, before: checklist, after, changed };
+  if (changed === 0) {
+    return {
+      note: current.note,
+      before,
+      after,
+      changed: 0,
+      rewrote: false,
+      preserved: ["everything"],
+      lost: [],
+    };
+  }
 
-  await rebuild(note, updated, force);
-  return { note, before: checklist, after, changed, warning: HIGHLIGHT_WARNING };
+  const result = await writeNote(ref, renderDialectLines(updated), { onConflict });
+  return {
+    note: result.note,
+    before,
+    after,
+    changed,
+    rewrote: result.rewrote,
+    preserved: result.preserved,
+    lost: result.lost,
+  };
 }
 
 /** Uncheck every checklist item in a note. The workout-reset case. */
-export function clearChecklist(ref: string, force = false): Promise<ChecklistChange> {
-  return applyChecklistChange(ref, () => true, false, force);
+export function clearChecklist(ref: string, onConflict: OnConflict = "refuse") {
+  return applyChecklistChange(ref, () => true, { checked: false }, onConflict);
 }
 
 /** Check every checklist item in a note. */
-export function checkAll(ref: string, force = false): Promise<ChecklistChange> {
-  return applyChecklistChange(ref, () => true, true, force);
+export function checkAll(ref: string, onConflict: OnConflict = "refuse") {
+  return applyChecklistChange(ref, () => true, { checked: true }, onConflict);
 }
 
-/** Set specific items, addressed by index or by text match. */
+/** Update specific items, addressed by index or by text match. */
 export function setItems(
   ref: string,
   target: { indices?: number[]; text?: string; exact?: boolean },
-  value: boolean | "toggle",
-  force = false,
+  update: ChecklistUpdate,
+  onConflict: OnConflict = "refuse",
 ): Promise<ChecklistChange> {
   const predicate =
     target.indices !== undefined
-      ? matchByIndex(target.indices)
+      ? (i: number) => target.indices!.includes(i)
       : target.text !== undefined
-        ? matchByText(target.text, target.exact ?? false)
+        ? (_i: number, text: string) =>
+            target.exact
+              ? text === target.text
+              : text.toLowerCase().includes(target.text!.toLowerCase())
         : () => true;
-  return applyChecklistChange(ref, predicate, value, force);
-}
-
-/** Replace a note's entire content with new Markdown. */
-export async function replaceContent(
-  ref: string,
-  markdown: string,
-  force = false,
-): Promise<as.NoteMeta> {
-  const note = await resolveNote(ref);
-  const html = await as.getBodyHtml(note.id);
-  const lost = describeLoss(html);
-  if (!force && lost.length) throw new RichContentError(note.name, lost);
-
-  await as.clearBody(note.id, note.name, as.extractTitleHtml(html));
-  if (markdown.trim()) {
-    try {
-      await bridge.appendMarkdown(note.name, markdown);
-    } catch (e) {
-      try {
-        await as.setBodyHtml(note.id, html);
-      } catch {
-        throw new RebuildFailedError(note.name, e, false);
-      }
-      throw new RebuildFailedError(note.name, e, true);
-    }
-  }
-  return note;
+  return applyChecklistChange(ref, predicate, update, onConflict);
 }

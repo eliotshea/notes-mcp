@@ -211,10 +211,66 @@ function buildCreateNote(): Json {
   ]);
 }
 
+/**
+ * Append one checklist item, optionally already checked.
+ *
+ * `CreateChecklistItemLinkAction` takes the item text as a parameter instead of
+ * re-parsing it as Markdown, so text that looks like markup stays literal.
+ * Chaining its output into the setter is the only way to produce a checked item
+ * through App Intents: `ChecklistItemEntity` cannot be looked up, so the entity
+ * has to come from the action that just created it (docs/edit-model.md Part 8).
+ *
+ * `changeOperation` is an enum fixed at build time, which is why checked and
+ * unchecked are two shortcuts rather than one with a parameter.
+ *
+ * Input: {"note": "<exact name>", "text": "<item text>"}
+ */
+function buildAddChecklistItem(checked: boolean): () => Json {
+  return () => {
+    const noteKey = newUuid();
+    const textKey = newUuid();
+    const find = newUuid();
+    const create = newUuid();
+    const actions = [
+      getValueForKey(noteKey, "note"),
+      getValueForKey(textKey, "text"),
+      findNoteByName(find, outputText(noteKey, "Dictionary Value")),
+      notesAction(create, "CreateChecklistItemLinkAction", {
+        name: outputText(textKey, "Dictionary Value"),
+        noteEntity: outputAttachment(find, "Note"),
+      }),
+    ];
+    if (checked) {
+      actions.push(
+        notesAction(newUuid(), "SetChecklistItemCheckedLinkActionv2", {
+          changeOperation: "check",
+          entities: outputAttachment(create, "Checklist Item"),
+          note: outputAttachment(find, "Note"),
+        }),
+      );
+    }
+    return workflow(actions);
+  };
+}
+
+export const SHORTCUT_ADD_ITEM = "notes-mcp-add-checklist-item";
+export const SHORTCUT_ADD_ITEM_CHECKED = "notes-mcp-add-checklist-item-checked";
+
+/**
+ * Shortcuts the server uses when present but does not require.
+ *
+ * They only make appended checklist items escaping-safe; without them the
+ * Markdown append still produces correct items. Keeping them optional means an
+ * existing install keeps working without a second round of import prompts.
+ */
+export const OPTIONAL_SHORTCUTS = [SHORTCUT_ADD_ITEM, SHORTCUT_ADD_ITEM_CHECKED] as const;
+
 export const BUILDERS: Record<string, () => Json> = {
   [SHORTCUT_READ]: buildReadBody,
   [SHORTCUT_APPEND]: buildAppendMarkdown,
   [SHORTCUT_CREATE]: buildCreateNote,
+  [SHORTCUT_ADD_ITEM]: buildAddChecklistItem(false),
+  [SHORTCUT_ADD_ITEM_CHECKED]: buildAddChecklistItem(true),
 };
 
 /**

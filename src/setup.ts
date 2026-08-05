@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import * as as from "./applescript.js";
 import { duplicateShortcuts, listInstalled, missingShortcuts } from "./shortcuts.js";
-import { REQUIRED_SHORTCUTS, generateShortcuts } from "./wfbuild.js";
+import { OPTIONAL_SHORTCUTS, REQUIRED_SHORTCUTS, generateShortcuts } from "./wfbuild.js";
 
 const execFileAsync = promisify(execFile);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -114,6 +114,47 @@ async function main() {
       process.exit(1);
     }
     pass("Bridge shortcuts installed");
+  }
+
+  // 4b. Optional shortcuts. These only make appended checklist items
+  // escaping-safe, so a missing one degrades to a Markdown append rather than
+  // failing -- which is why they are offered rather than required.
+  const installedNames = new Set(await listInstalled());
+  const missingOptional = OPTIONAL_SHORTCUTS.filter((n) => !installedNames.has(n));
+  if (missingOptional.length === 0) {
+    pass(`Optional shortcuts installed (${OPTIONAL_SHORTCUTS.join(", ")})`);
+  } else if (doctorOnly) {
+    warn(`Optional shortcuts not installed: ${missingOptional.join(", ")}`);
+    console.log(
+      `  ${DIM}Appended checklist items will go through a Markdown append.${RESET}\n`,
+    );
+  } else if (process.argv.includes("--with-optional")) {
+    const paths = await generateShortcuts(missingOptional);
+    console.log(
+      `\n  ${YELLOW}Opening ${paths.length} more import prompts.${RESET}\n`,
+    );
+    for (const p of paths) {
+      await execFileAsync("open", [p]);
+      await sleep(1200);
+    }
+    console.log("  Waiting for the imports to complete...\n");
+    const deadline = Date.now() + 180_000;
+    let left = missingOptional;
+    while (left.length && Date.now() < deadline) {
+      await sleep(2000);
+      const now = new Set(await listInstalled());
+      left = missingOptional.filter((n) => !now.has(n));
+    }
+    if (left.length) warn(`Still missing: ${left.join(", ")}`);
+    else pass("Optional shortcuts installed");
+  } else {
+    warn(`Optional shortcuts not installed: ${missingOptional.join(", ")}`);
+    console.log(
+      `  ${DIM}Everything works without them; appended checklist items just go\n` +
+        `  through a Markdown append, so text that looks like Markdown is\n` +
+        `  re-parsed rather than kept literal. Install with:${RESET}\n` +
+        `    npx notes-mcp-setup --with-optional\n`,
+    );
   }
 
   // 5. End-to-end verification

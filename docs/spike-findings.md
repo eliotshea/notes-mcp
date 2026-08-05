@@ -353,12 +353,30 @@ input:  U_START <u>underlined</u> U_END
 result: U_START &ltu&gtunderlined&lt/u&gt U_END
 ```
 
-Decisive: Markdown is the only write path that can produce checkboxes, so
-**underline, colour, highlight and Caption are unreachable in any note
-containing a checklist.** Writing rich HTML through AppleScript would destroy the
-checkboxes, and the three formatting intents (`ApplyFormattingIntent`,
-`SetParagraphStyleIntent`, `ReplaceSelectionIntent`) act on the UI selection,
-which is not reachable headlessly.
+Markdown is the only write path that can produce checkboxes, and the three
+formatting intents (`ApplyFormattingIntent`, `SetParagraphStyleIntent`,
+`ReplaceSelectionIntent`) act on the UI selection, which is not reachable
+headlessly.
+
+> **Superseded in part.** This section originally concluded that *"underline,
+> colour, highlight and Caption are unreachable in any note containing a
+> checklist."* That holds for a **single-phase rebuild** — clear the body, then
+> append Markdown — which was the only write shape the server performed at the
+> time. It is not true of the primitives in general.
+>
+> `appendMarkdown` is **additive**: it does not rewrite what sits above it. So a
+> two-phase write —- `setBodyHtml` for a colour/underline prefix, then
+> `appendMarkdown` for a checklist suffix -— preserves both. Verified
+> end-to-end, and now the planner's Rule 5 (`docs/edit-model.md` Part 3).
+>
+> The residual constraint is ordering, not capability: `setBodyHtml` replaces
+> the whole body and must come first, so a note permits at most one
+> HTML→Markdown transition. Colour *below* a checklist item remains unreachable.
+>
+> Two further corrections from the same test: `<a href>` is stripped to a bare
+> `<u>`, and `<blockquote>` collapses to a plain `<div>`. **Links and block
+> quotes survive neither write path**, so they belong with images and
+> highlighting rather than with colour and underline.
 
 Note also that Notes emits **entities without semicolons** (`&ltu&gt`, and
 `&amp&amp` for `&&`). A decoder must accept both forms, and a greedy `[a-z]+`
@@ -455,8 +473,15 @@ reported as unpreservable.
 
 ## Remaining limitations
 
-1. No checklist-item enumeration action → state changes go through rebuild
-   rather than surgical per-item toggles.
+1. No checklist-item enumeration action → **changing state on an existing item**
+   goes through rebuild rather than a surgical toggle. Now proven rather than
+   assumed: `SetChecklistItemCheckedLinkActionv2` runs headlessly, but exactly
+   two actions in the bundle produce a `ChecklistItemEntity` — the create action,
+   which makes a *new* item, and the setter itself — so a pre-existing item
+   cannot be addressed. `VisibleChecklistItemsQuery` lacks the property-filter
+   capability its `Note`/`Attachment`/`Table` siblings have (70 vs 78), so no
+   Find action exists, and resolving from text raises an interactive picker.
+   **Appending** an item, by contrast, never needed a rebuild.
 2. **Underline, colour, highlight, Caption, block quotes and links cannot be
    written back**, because the Markdown importer rejects raw HTML (§12).
    Attachments and tables are likewise unreconstructable.

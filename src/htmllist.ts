@@ -111,6 +111,56 @@ export function inlineMarkdown(html: string): string {
   return textOf(s);
 }
 
+/**
+ * Convert a block's inline markup to the edit dialect.
+ *
+ * Where `inlineMarkdown` drops everything Markdown cannot express, this keeps
+ * it, using bracketed spans for the three constructs Markdown has no syntax
+ * for. See docs/dialect.md.
+ *
+ *   <font color="#FF0505">x</font>  ->  [x]{color=#FF0505}
+ *   <u>x</u>                        ->  [x]{u}
+ *   <a href="u">x</a>               ->  [x]{link=u}
+ *
+ * Colour and underline are writable through the AppleScript HTML phase; links
+ * are not writable at all and round-trip only as a read-only token.
+ */
+export function inlineDialect(html: string): string {
+  let s = html
+    .replace(/<\/?(span|div|p)\b[^>]*>/gi, "")
+    .replace(/<br\s*\/?>/gi, "");
+
+  // Anchors first: Notes renders them with an underline, so an <a> nested in a
+  // <u> would otherwise be reported twice.
+  s = s.replace(
+    /<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a\s*>/gi,
+    (_m, href: string, inner: string) => `[${textOf(inner)}]{link=${decodeEntities(href)}}`,
+  );
+
+  s = s.replace(
+    /<font\b[^>]*color=["']?(#[0-9a-f]{3,8})["']?[^>]*>([\s\S]*?)<\/font\s*>/gi,
+    (_m, colour: string, inner: string) => {
+      const body = inlineDialect(inner);
+      return body.trim() ? `[${body.trim()}]{color=${colour.toUpperCase()}}` : body;
+    },
+  );
+  s = s.replace(/<\/?font\b[^>]*>/gi, "");
+
+  s = s.replace(/<u\b[^>]*>([\s\S]*?)<\/u\s*>/gi, (_m, inner: string) => {
+    const body = inlineDialect(inner);
+    return body.trim() ? `[${body.trim()}]{u}` : body;
+  });
+
+  s = s
+    .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) => wrapInline(inner, "**"))
+    .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) => wrapInline(inner, "*"))
+    .replace(/<(s|strike|del)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_m, _t, inner) =>
+      wrapInline(inner, "~~"),
+    );
+
+  return textOf(s);
+}
+
 /** Inline constructs in a note's HTML that a rebuild cannot write back. */
 export function describeInlineLoss(html: string): string[] {
   const lost: string[] = [];
@@ -141,6 +191,8 @@ export interface HtmlBlock {
   dashList: boolean;
   /** The block's text with bold/italic/strike expressed as Markdown. */
   markdown: string;
+  /** The block's text in the edit dialect, keeping colour, underline, links. */
+  dialect: string;
 }
 
 /**
@@ -178,6 +230,7 @@ export function parseHtmlBlocks(html: string): HtmlBlock[] {
         level: 0,
         text: textOf(liInner),
         markdown: inlineMarkdown(liInner),
+        dialect: inlineDialect(liInner),
         depth: Math.max(0, stack.length - 1),
         ordered: top?.ordered ?? false,
         dashList: top?.dashList ?? false,
@@ -194,6 +247,7 @@ export function parseHtmlBlocks(html: string): HtmlBlock[] {
         level: heading ? Number(heading[1]) : 0,
         text,
         markdown: inlineMarkdown(divInner),
+        dialect: inlineDialect(divInner),
         depth: 0,
         ordered: false,
         dashList: false,
@@ -256,6 +310,8 @@ export interface LineStructure {
   headingLevel: number;
   /** Text with bold/italic/strike as Markdown, or "" when unavailable. */
   markdown: string;
+  /** Text in the edit dialect, or "" when unavailable. */
+  dialect: string;
 }
 
 /**
@@ -274,7 +330,7 @@ export function alignBlocks(
   bridgeLines: { text: string; isList: boolean }[],
   blocks: HtmlBlock[],
 ): { structure: LineStructure[]; aligned: boolean } {
-  const flat = bridgeLines.map(() => ({ depth: 0, headingLevel: 0, markdown: "" }));
+  const flat = bridgeLines.map(() => ({ depth: 0, headingLevel: 0, markdown: "", dialect: "" }));
   // The first block is the title, which the bridge omits.
   const body = blocks.length && blocks[0].kind !== "item" ? blocks.slice(1) : blocks;
 
@@ -300,7 +356,12 @@ export function alignBlocks(
 
   const structure = flat.map((f, i) =>
     i < n
-      ? { depth: body[i].depth, headingLevel: body[i].level, markdown: body[i].markdown }
+      ? {
+          depth: body[i].depth,
+          headingLevel: body[i].level,
+          markdown: body[i].markdown,
+          dialect: body[i].dialect,
+        }
       : f,
   );
   return { structure, aligned: true };

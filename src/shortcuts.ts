@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   REQUIRED_SHORTCUTS,
+  SHORTCUT_ADD_ITEM,
+  SHORTCUT_ADD_ITEM_CHECKED,
   SHORTCUT_APPEND,
   SHORTCUT_CREATE,
   SHORTCUT_READ,
@@ -127,6 +129,24 @@ export async function readBody(noteName: string): Promise<string> {
 /** Append Markdown to a note; `- [ ]` / `- [x]` become real checklist items. */
 export async function appendMarkdown(noteName: string, markdown: string): Promise<void> {
   await runShortcut(SHORTCUT_APPEND, { note: noteName, markdown });
+}
+
+/**
+ * Append one checklist item without rewriting the note.
+ *
+ * Returns false when the optional shortcuts are not installed, so callers can
+ * fall back to a Markdown append rather than failing.
+ */
+export async function addChecklistItem(
+  noteName: string,
+  text: string,
+  checked: boolean,
+): Promise<boolean> {
+  const name = checked ? SHORTCUT_ADD_ITEM_CHECKED : SHORTCUT_ADD_ITEM;
+  const installed = new Set(await listInstalled());
+  if (!installed.has(name)) return false;
+  await runShortcut(name, { note: noteName, text });
+  return true;
 }
 
 /**

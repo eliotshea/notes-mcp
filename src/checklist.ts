@@ -53,6 +53,14 @@ export interface NoteLine {
    * the styling is lost -- so this is what makes bold survive a rebuild.
    */
   markdown: string;
+  /**
+   * The line's text in the edit dialect.
+   *
+   * Like `markdown`, but additionally carrying colour, underline and links --
+   * everything the note's HTML reveals. This is what `renderDialect` emits and
+   * what the write planner inspects to decide which primitives a target needs.
+   */
+  dialect: string;
 }
 
 export interface ChecklistItem {
@@ -105,6 +113,7 @@ export function parseBody(body: string): NoteLine[] {
           ordinal: 0,
           headingLevel: 0,
           markdown: "",
+          dialect: "",
         });
         continue;
       }
@@ -118,6 +127,7 @@ export function parseBody(body: string): NoteLine[] {
         ordinal: ord ? Number(ord[1]) : 0,
         headingLevel: 0,
         markdown: "",
+        dialect: "",
       });
       continue;
     }
@@ -131,6 +141,7 @@ export function parseBody(body: string): NoteLine[] {
       ordinal: 0,
       headingLevel: 0,
       markdown: "",
+      dialect: "",
     });
   }
   return out;
@@ -258,7 +269,7 @@ export function applyDepths(lines: NoteLine[], depths: number[]): NoteLine[] {
  */
 export function applyStructure(
   lines: NoteLine[],
-  structure: { depth: number; headingLevel: number; markdown?: string }[],
+  structure: { depth: number; headingLevel: number; markdown?: string; dialect?: string }[],
 ): NoteLine[] {
   if (structure.length !== lines.length) return lines;
   return lines.map((line, i) => ({
@@ -266,5 +277,6 @@ export function applyStructure(
     depth: line.listIndex >= 0 ? structure[i].depth : 0,
     headingLevel: line.kind === "text" ? structure[i].headingLevel : 0,
     markdown: structure[i].markdown ?? "",
+    dialect: structure[i].dialect ?? "",
   }));
 }
