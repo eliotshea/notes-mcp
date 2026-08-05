@@ -85,6 +85,17 @@ export async function runShortcut(name: string, args: Record<string, string>): P
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // "an action could not be found" is a DIFFERENT failure: the shortcut is
+      // installed but references an action identifier this system has no
+      // provider for. Reporting that as a missing shortcut sends the caller to
+      // re-run setup, which cannot fix it.
+      if (/action could not be found/i.test(msg)) {
+        throw new ShortcutRunError(
+          name,
+          "it references an action this system does not provide, so the " +
+            "shortcut is installed but unrunnable",
+        );
+      }
       if (/could not be found/i.test(msg)) throw new ShortcutMissingError(name);
       if (/cancelled/i.test(msg)) {
         throw new ShortcutRunError(

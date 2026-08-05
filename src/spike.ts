@@ -150,6 +150,43 @@ function buildSetChecked(findActionId: string, findOutputName: string): () => Js
   };
 }
 
+/**
+ * Set checked state by naming the item as plain text.
+ *
+ * Both Find-action guesses failed with "an action could not be found", and the
+ * query metadata says why: VisibleChecklistItemsQuery has capabilities 70 while
+ * VisibleNotesQuery -- the one behind the working note filter -- has 78. The
+ * missing bit is set on exactly the entities that support property filtering
+ * (Note, Attachment, Table) and clear on those that do not (ChecklistItem,
+ * Account, Folder, Tag). So no "Find Checklist Items where Text is X" action
+ * exists to reference.
+ *
+ * That leaves App Intents' own string resolution: hand `entities` a text value
+ * and let the intent resolve it through the query, scoped by `note`.
+ *
+ * Input: {"note": "<exact name>", "text": "<item text>"}
+ */
+function buildSetCheckedByText(scopeToNote: boolean): () => Json {
+  return () => {
+    const noteKey = newUuid();
+    const textKey = newUuid();
+    const findNote = newUuid();
+    return workflow([
+      getValueForKey(noteKey, "note"),
+      getValueForKey(textKey, "text"),
+      findNoteByName(findNote, outputText(noteKey, "Dictionary Value")),
+      notesAction(newUuid(), "SetChecklistItemCheckedLinkActionv2", {
+        changeOperation: "check",
+        entities: outputText(textKey, "Dictionary Value"),
+        ...(scopeToNote ? { note: outputAttachment(findNote, "Note") } : {}),
+      }),
+    ]);
+  };
+}
+
+export const SPIKE_SET_C = "notes-mcp-spike-set-checked-c";
+export const SPIKE_SET_D = "notes-mcp-spike-set-checked-d";
+
 const SPIKE_BUILDERS: Record<string, () => Json> = {
   [SPIKE_ADD]: buildAddItem,
   // Guess A: App Intents entities addressed the way notesAction addresses
@@ -161,11 +198,17 @@ const SPIKE_BUILDERS: Record<string, () => Json> = {
     "is.workflow.actions.filter.checklistitems",
     "Checklist Items",
   ),
+  // C and D drop the Find action entirely and let the intent resolve the item
+  // from text, with and without a note to scope the search.
+  [SPIKE_SET_C]: buildSetCheckedByText(true),
+  [SPIKE_SET_D]: buildSetCheckedByText(false),
 };
 
-async function generate(dir: string): Promise<string[]> {
+async function generate(dir: string, only: string[]): Promise<string[]> {
   const paths: string[] = [];
-  for (const [name, build] of Object.entries(SPIKE_BUILDERS)) {
+  for (const [name, build] of Object.entries(SPIKE_BUILDERS).filter(([n]) =>
+    only.includes(n),
+  )) {
     const unsigned = join(dir, `${name}-unsigned.shortcut`);
     const signed = join(dir, `${name}.shortcut`);
     await writeFile(unsigned, plist.build(build() as never), "utf8");
@@ -214,7 +257,7 @@ async function main() {
 
   if (missing.length) {
     const dir = await mkdtemp(join(tmpdir(), "notes-mcp-spike-"));
-    const paths = await generate(dir);
+    const paths = await generate(dir, missing);
     console.log(
       `Built ${paths.length} shortcut(s). Shortcuts will now open an import\n` +
         `prompt for each one -- click ${BOLD}Add Shortcut${RESET} on all of them.\n` +
@@ -262,8 +305,10 @@ async function main() {
   console.log(`\n${BOLD}2. SetChecklistItemCheckedLinkActionv2${RESET} ${DIM}(the payoff)${RESET}`);
   const results: Record<string, string> = {};
   for (const [label, name] of [
-    ["guess A  com.apple.Notes.ChecklistItemEntity", SPIKE_SET_A],
-    ["guess B  is.workflow.actions.filter.checklistitems", SPIKE_SET_B],
+    ["guess A  find via com.apple.Notes.ChecklistItemEntity", SPIKE_SET_A],
+    ["guess B  find via is.workflow.actions.filter.checklistitems", SPIKE_SET_B],
+    ["guess C  entities as text, scoped to note", SPIKE_SET_C],
+    ["guess D  entities as text, unscoped", SPIKE_SET_D],
   ] as const) {
     await resetNote();
     try {

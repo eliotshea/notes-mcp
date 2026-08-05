@@ -337,25 +337,51 @@ quotes, highlighting, images and tables all survive because they are never
 touched. Rules 3–7, the conflict refusals, the `on_conflict` parameter and most
 of the `lost` array all become dead code.
 
-### The risk
+### Spike result — run, and the answer is split
 
-`VisibleChecklistItemsQuery` — "Visible" may mean *visible in the UI*, in which
-case it is no more reachable headlessly than `ApplyFormattingIntent` or
-`ReplaceSelectionIntent`, which §12 already found act on the UI selection. The
-intents unambiguously exist; whether they resolve entities without a foreground
-window is untested.
+`src/spike.ts` built and ran four candidate shortcuts. The outcome divides
+cleanly between adding an item and changing its state.
 
-### Spike before building any of Parts 1–6
+**`CreateChecklistItemLinkAction` works headlessly.** It takes only `name` and
+`noteEntity`, so the proven `filter.notes` action supplies everything it needs.
+Verified: an item was added to a seeded note and read back through the bridge,
+with no clear, no re-append, and nothing rewritten. **Adding a checklist item
+does not require a rebuild.**
 
-1. Build a shortcut wiring `VisibleChecklistItemsQuery` → filter by note →
-   `SetChecklistItemsCheckedIntent`, following the runtime-parameter pattern
-   already proven in `wfbuild.ts` and `spike-findings.md` §8.
-2. Run it via `shortcuts run` with no Notes window open.
-3. If it toggles state headlessly, **stop and redesign**: the dialect (Part 2)
-   is still worth building for reads and full-document writes, but the planner
-   (Part 3) shrinks to a fast path plus a fallback, and the checklist tools
-   become thin wrappers over real per-item intents.
-4. If it needs the UI, this document stands as written and §10 stands with it.
+**`SetChecklistItemCheckedLinkActionv2` is not reachable headlessly.** Its
+`entities` parameter needs `ChecklistItemEntity` values, and there is no way to
+produce them without the UI:
 
-This spike is cheap relative to Phases 1–3 and determines whether they are worth
-doing. It should happen first.
+- Two Find-action identifiers were tried; both failed with *"an action could not
+  be found"*, i.e. no such action is registered.
+- Passing `entities` as plain text, with and without a `note` to scope it, made
+  Shortcuts fall back to **an interactive "choose a checklist item" picker** —
+  the documented dead end from `wfbuild.ts`'s header.
+
+The query metadata explains why. `VisibleChecklistItemsQuery` has
+`capabilities: 70`; `VisibleNotesQuery`, which backs the working note filter,
+has `78`. The missing bit is set on exactly the entities that support property
+filtering — Note, Attachment, Table — and clear on those that do not:
+ChecklistItem, Account, Folder, Tag. **`ChecklistItemEntity` cannot be
+property-queried, so no filter action exists to reference and no string
+resolution is offered.** Only an interactive picker can produce one.
+
+### Consequence
+
+`spike-findings.md` §10 **stands for checked state**: changing it still requires
+a rebuild, and Parts 1–7 of this document remain the plan.
+
+§10 is **wrong about adding items**. It generalises "no per-item toggling" into
+"state changes go through rebuild", and `CreateChecklistItemLinkAction` shows
+the append case never needed one. Fold this into Rule 2: appending checklist
+items becomes a genuine per-item intent rather than a Markdown append, which
+also removes the list-merging quirk where an appended item joins a preceding
+dash list.
+
+### Still worth trying
+
+`CreateChecklistItemLinkAction` returns the entity it created. If that output
+can feed `SetChecklistItemCheckedLinkActionv2`'s `entities`, then **appending an
+already-checked item** works without a rebuild, even though checking an existing
+one does not. Worth one more shortcut; it is the last unexplored path to a
+headless setter.
